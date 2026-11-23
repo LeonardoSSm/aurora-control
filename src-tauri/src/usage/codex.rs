@@ -478,6 +478,7 @@ fn rollout_fallback(home: &Path, now: DateTime<Utc>) -> Option<Fetched> {
     newest_rollouts(home, &mut budget)
         .iter()
         .filter_map(|path| read_tail_within(path, ROLLOUT_TAIL, &mut budget).ok())
+        .map(|tail| tail.text)
         .filter_map(|text| parse_rollout(&text, now))
         .max_by_key(|fetched| fetched.observed_at)
 }

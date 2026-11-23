@@ -161,7 +161,9 @@ impl Service {
         let slot = self
             .slots
             .iter()
-            .find(|slot| slot.adapter.provider() == provider)?;
+            .find(|slot| slot.adapter.provider() == provider)
+            // A hidden provider has no files read, not even for the diagnosis.
+            .filter(|slot| slot.enabled.load(Ordering::SeqCst))?;
         let now = Now::current();
         let rows = guarded(|| slot.adapter.diagnostics(now.utc)).flatten()?;
         let usage = lock(&slot.tracker).usage(now);
@@ -406,6 +408,42 @@ mod tests {
         assert_eq!(all.len(), count, "no sequence is published twice");
         assert_eq!(*lock(&service.sequence), count as u64);
     }
+    /// Counts diagnosis reads, which touch the provider's local files.
+    struct Diagnosed {
+        reads: Arc<Mutex<u32>>,
+    }
+
+    impl UsageAdapter for Diagnosed {
+        fn provider(&self) -> Provider {
+            Provider::ClaudeCode
+        }
+        fn fetch(&self, _now: chrono::DateTime<chrono::Utc>) -> Outcome {
+            Outcome::failed(FetchError::AuthMissing)
+        }
+        fn diagnostics(
+            &self,
+            _now: chrono::DateTime<chrono::Utc>,
+        ) -> Option<Vec<model::DiagnosticRow>> {
+            *lock(&self.reads) += 1;
+            Some(vec![])
+        }
+    }
+
+    #[test]
+    fn a_hidden_provider_is_not_diagnosed() {
+        let reads = Arc::new(Mutex::new(0));
+        let service = Service::new(vec![Box::new(Diagnosed {
+            reads: Arc::clone(&reads),
+        })]);
+        assert!(service.diagnostics(Provider::ClaudeCode).is_some());
+        assert_eq!(*lock(&reads), 1);
+        service.set_visible(&[Provider::Codex]);
+        assert!(service.diagnostics(Provider::ClaudeCode).is_none());
+        assert_eq!(*lock(&reads), 1, "no file read while hidden");
+        service.set_visible(&[Provider::ClaudeCode]);
+        assert!(service.diagnostics(Provider::ClaudeCode).is_some());
+    }
+
     #[test]
     fn issues_serialize_with_a_code_tag() {
         let issue = model::Issue::RateLimited {

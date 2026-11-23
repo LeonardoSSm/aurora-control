@@ -43,7 +43,14 @@ function App() {
     setSaving(true);
     setError(null);
     void setPreferences(preferences)
-      .then(setView, (failure: unknown) => setError(message(failure)))
+      .then(
+        (next) => {
+          setView(next);
+          // Showing or hiding Claude Code changes what may be diagnosed.
+          recheck();
+        },
+        (failure: unknown) => setError(message(failure)),
+      )
       .finally(() => setSaving(false));
   };
 

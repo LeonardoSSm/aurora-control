@@ -156,10 +156,10 @@ A identidade semicircular não mudou: mesmos círculos de 52 px, arco interno e 
 | Verificação                                                | Resultado                                                                                                                                                        |
 | ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `npm run format:check`, `npm run lint`, `npx tsc --noEmit` | Aprovados.                                                                                                                                                       |
-| `npm test`                                                 | 26/26 em 3 arquivos (eram 15).                                                                                                                                   |
+| `npm test`                                                 | 27/27 em 3 arquivos (eram 15).                                                                                                                                   |
 | `cargo fmt --check`                                        | Aprovado.                                                                                                                                                        |
 | `cargo clippy --locked --all-targets -- -D warnings`       | Aprovado.                                                                                                                                                        |
-| `cargo test --locked`                                      | 122 aprovados, 1 ignorado de propósito (eram 47).                                                                                                                |
+| `cargo test --locked`                                      | 126 aprovados, 1 ignorado de propósito (eram 47).                                                                                                                |
 | `cargo test -- --ignored registry_round_trip`              | Aprovado: o wrapper real do registro grava, lê e remove um valor numa subchave temporária de `HKCU\Software`, removida em seguida. A chave `Run` não foi tocada. |
 
 ### Validação interativa (build de debug, modo demo, 96 DPI)
@@ -201,6 +201,16 @@ A identidade semicircular não mudou: mesmos círculos de 52 px, arco interno e 
 | `npm audit` e `npm audit --omit=dev`                       | 0 vulnerabilidades.                                                                                                                                                                                                                      |
 | `cargo audit`                                              | Não executado: `cargo-audit` não está instalado nesta máquina.                                                                                                                                                                           |
 | CI                                                         | Workflow criado, ainda não executado no GitHub: a branch não foi enviada.                                                                                                                                                                |
+
+## Revisão do Codex no PR #1
+
+Três achados P2 sobre `e4fd96c`, todos corrigidos com regressão:
+
+| Achado                                                                                                                 | Correção                                                                                                                                                                                                                                          | Regressão                                                                          |
+| ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| O diagnóstico lia os arquivos do Claude Code mesmo com o provedor oculto.                                              | `Service::diagnostics` devolve `None` para um provedor desativado, sem chamar o adaptador. A janela explica que o provedor está oculto e refaz o diagnóstico depois de salvar.                                                                    | `usage::a_hidden_provider_is_not_diagnosed`, `settings.test.tsx` (provedor oculto) |
+| Uma transcrição cortada pelo limite de 8 MiB por arquivo não marcava `partial`.                                        | `read_tail_within` informa se o início ficou de fora (`Tail.cut`). Um corte vira `partial` quando o primeiro registro datado do trecho lido é posterior ao início da janela de 5 h. Um corte que só descarta registros antigos continua completo. | `claude::truncation_tests` (2)                                                     |
+| Se gravar as preferências falhasse depois de alterar o registro, a entrada de inicialização e a preferência divergiam. | `autostart::apply_then` lê a entrada anterior, aplica a mudança e, se a gravação falhar, restaura a entrada exatamente como estava, inclusive a de outra cópia.                                                                                   | `autostart::a_failed_save_restores_the_previous_entry`                             |
 
 ## Testes não executados e riscos residuais
 

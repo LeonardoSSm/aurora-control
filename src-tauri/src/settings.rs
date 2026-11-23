@@ -63,18 +63,19 @@ pub fn set_preferences(app: AppHandle, preferences: Preferences) -> Result<Setti
     let preferences = preferences.validate()?;
     let store = app.state::<Store>();
     let previous = store.get();
-    if preferences.launch_at_startup != previous.launch_at_startup
-        || (preferences.launch_at_startup && startup_status() != autostart::Status::Enabled)
-    {
+    let startup_changes = preferences.launch_at_startup != previous.launch_at_startup
+        || (preferences.launch_at_startup && startup_status() != autostart::Status::Enabled);
+    if startup_changes {
+        // The registry entry and the saved preference change together: a
+        // failed save restores the entry as it was.
         let exe = executable().ok_or("Executável não localizado")?;
-        autostart::apply(
-            &autostart::Registry::run(),
-            &exe,
-            preferences.launch_at_startup,
-        )
-        .map_err(|error| format!("Inicialização com o Windows: {error}"))?;
+        let enabled = preferences.launch_at_startup;
+        autostart::apply_then(&autostart::Registry::run(), &exe, enabled, || {
+            store.set(preferences)
+        })?;
+    } else {
+        store.set(preferences)?;
     }
-    store.set(preferences)?;
     windows::preferences_changed(&app);
     Ok(view(&app))
 }

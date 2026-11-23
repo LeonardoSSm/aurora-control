@@ -252,7 +252,9 @@ export function Settings({
           <p className="settings-hint">
             {view.demo
               ? "Modo de demonstração: nenhum arquivo do Claude Code é lido."
-              : "Diagnóstico indisponível."}
+              : !preferences.providers.claudeCode
+                ? "Claude Code oculto: nenhum arquivo dele é lido. Mostre-o para ver o diagnóstico."
+                : "Diagnóstico indisponível."}
           </p>
         )}
         <div className="settings-actions">

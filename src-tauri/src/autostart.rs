@@ -57,6 +57,31 @@ pub fn apply(key: &impl RunKey, exe: &Path, enabled: bool) -> io::Result<()> {
     }
 }
 
+/// Applies the start-up choice, then runs `persist` (saving the
+/// preferences). If `persist` fails, the entry is restored exactly as it was
+/// before (including an entry of another copy), so the registry and the saved
+/// preference never disagree.
+pub fn apply_then<T>(
+    key: &impl RunKey,
+    exe: &Path,
+    enabled: bool,
+    persist: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let before = key
+        .read()
+        .map_err(|error| format!("Inicialização com o Windows: {error}"))?;
+    apply(key, exe, enabled).map_err(|error| format!("Inicialização com o Windows: {error}"))?;
+    persist().inspect_err(|_| {
+        let restored = match &before {
+            Some(command) => key.write(command),
+            None => key.delete(),
+        };
+        if restored.is_err() {
+            eprintln!("Aurora Control: could not restore the start-up entry");
+        }
+    })
+}
+
 #[cfg(windows)]
 pub struct Registry {
     subkey: String,
@@ -202,6 +227,28 @@ mod tests {
         apply(&key, exe, false).unwrap();
         apply(&key, exe, false).unwrap();
         assert_eq!(status(&key, exe), Status::Disabled);
+    }
+
+    #[test]
+    fn a_failed_save_restores_the_previous_entry() {
+        let exe = Path::new(r"C:\new\aurora-control.exe");
+        let failing = || Err::<(), _>("disk full".to_string());
+        // Enabling from nothing: the new entry is removed again.
+        let key = Fake::default();
+        assert!(apply_then(&key, exe, true, failing).is_err());
+        assert_eq!(status(&key, exe), Status::Disabled);
+        // Disabling an enabled entry: it comes back.
+        apply(&key, exe, true).unwrap();
+        assert!(apply_then(&key, exe, false, failing).is_err());
+        assert_eq!(status(&key, exe), Status::Enabled);
+        // Another copy's entry is restored verbatim.
+        let other = r#""D:\old\aurora-control.exe""#;
+        key.write(other).unwrap();
+        assert!(apply_then(&key, exe, true, failing).is_err());
+        assert_eq!(key.value.borrow().as_deref(), Some(other));
+        // A successful save keeps the change.
+        assert_eq!(apply_then(&key, exe, true, || Ok(7)), Ok(7));
+        assert_eq!(status(&key, exe), Status::Enabled);
     }
 
     #[test]

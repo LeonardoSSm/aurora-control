@@ -138,3 +138,27 @@ describe("settings · status and diagnostics", () => {
     expect(render({ startup: "enabled" })).toContain("Ativo");
   });
 });
+
+describe("settings · hidden provider", () => {
+  it("explains that a hidden Claude Code is not diagnosed", () => {
+    const markup = renderToStaticMarkup(
+      <Settings
+        view={{
+          ...view,
+          preferences: {
+            ...view.preferences,
+            providers: { codex: true, claudeCode: false },
+          },
+        }}
+        diagnostics={null}
+        saving={false}
+        error={null}
+        now={now}
+        onSave={vi.fn()}
+        onRecheck={vi.fn()}
+      />,
+    );
+    expect(markup).toContain("Claude Code oculto: nenhum arquivo dele é lido");
+    expect(markup).not.toContain("Token vazio");
+  });
+});

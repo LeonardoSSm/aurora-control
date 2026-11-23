@@ -137,7 +137,7 @@ impl Budget {
 }
 
 /// [`read_tail`] within a budget: counts one file and the bytes read.
-pub fn read_tail_within(path: &Path, max: u64, budget: &mut Budget) -> io::Result<String> {
+pub fn read_tail_within(path: &Path, max: u64, budget: &mut Budget) -> io::Result<Tail> {
     if !budget.file() {
         return Err(io::Error::other("read budget exhausted"));
     }
@@ -146,7 +146,18 @@ pub fn read_tail_within(path: &Path, max: u64, budget: &mut Budget) -> io::Resul
     if granted == 0 && length > 0 {
         return Err(io::Error::other("read budget exhausted"));
     }
-    read_tail(path, granted)
+    Ok(Tail {
+        text: read_tail(path, granted)?,
+        cut: granted < length,
+    })
+}
+
+/// The end of a file, and whether its beginning was left out (by the
+/// per-file limit or by the cumulative budget).
+#[derive(Debug)]
+pub struct Tail {
+    pub text: String,
+    pub cut: bool,
 }
 
 /// Reads at most `max` bytes from the end of a file. When the read starts in
@@ -277,11 +288,16 @@ mod limit_tests {
         let second = dir.write("2.jsonl", &"line\n".repeat(100));
         let mut budget = Budget::new(10, 2, 600, 3, Duration::from_secs(60));
         assert_eq!(
-            read_tail_within(&first, 1000, &mut budget).unwrap().len(),
+            read_tail_within(&first, 1000, &mut budget)
+                .unwrap()
+                .text
+                .len(),
             500
         );
         // Only 100 bytes remain for the second file: its tail is truncated.
         let tail = read_tail_within(&second, 1000, &mut budget).unwrap();
+        assert!(tail.cut, "the second file was cut by the budget");
+        let tail = tail.text;
         assert!(tail.len() < 100, "{}", tail.len());
         assert!(budget.exhausted());
         assert!(read_tail_within(&first, 1000, &mut budget).is_err());

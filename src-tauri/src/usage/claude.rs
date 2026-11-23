@@ -399,6 +399,21 @@ pub fn parse_usage(body: &str, now: DateTime<Utc>) -> Result<Vec<Quota>, FetchEr
     Ok(quotas)
 }
 
+/// Whether a tail that starts mid-file still covers the whole window: its
+/// first dated record is at or before `since`. Otherwise earlier records of
+/// the window may lie in the part that was not read.
+fn covers_since(text: &str, since: DateTime<Utc>) -> bool {
+    text.lines()
+        .take(64)
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find_map(|record| {
+            record["timestamp"]
+                .as_str()
+                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        })
+        .is_some_and(|first| first.with_timezone(&Utc) <= since)
+}
+
 /// Sums the tokens of assistant turns written to local session transcripts in
 /// the last five hours. Cache reads are excluded: they re-read context
 /// already counted.
@@ -408,11 +423,17 @@ pub fn parse_usage(body: &str, now: DateTime<Utc>) -> Result<Vec<Quota>, FetchEr
 /// cumulative budget of entries, files, bytes, records and time; when a limit
 /// is reached the result is marked partial (audit I06).
 pub fn local_activity(projects: &Path, now: DateTime<Utc>) -> Option<LocalActivity> {
+    scan_activity(projects, now, TRANSCRIPT_TAIL)
+}
+
+fn scan_activity(projects: &Path, now: DateTime<Utc>, tail_limit: u64) -> Option<LocalActivity> {
     let since = time::minus(now, TimeDelta::minutes(i64::from(ACTIVITY_MINUTES)));
     let since_file = time::system_time(since)?;
     let mut budget = Budget::transcripts();
     let mut turns: HashMap<String, u64> = HashMap::new();
     let mut sessions = HashSet::new();
+    // A tail cut before the start of the activity window may miss records.
+    let mut cut_window = false;
     let directories = fs::read_dir(projects).ok()?;
     'scan: for directory in directories.flatten() {
         if !budget.entry() {
@@ -433,9 +454,13 @@ pub fn local_activity(projects: &Path, now: DateTime<Utc>) -> Option<LocalActivi
             if !recent || path.extension().is_none_or(|ext| ext != "jsonl") {
                 continue;
             }
-            let Ok(text) = read_tail_within(&path, TRANSCRIPT_TAIL, &mut budget) else {
+            let Ok(tail) = read_tail_within(&path, tail_limit, &mut budget) else {
                 continue;
             };
+            if tail.cut && !covers_since(&tail.text, since) {
+                cut_window = true;
+            }
+            let text = tail.text;
             for line in text.lines().filter(|line| line.contains("\"usage\"")) {
                 if !budget.record() {
                     break 'scan;
@@ -480,7 +505,7 @@ pub fn local_activity(projects: &Path, now: DateTime<Utc>) -> Option<LocalActivi
         window_minutes: ACTIVITY_MINUTES,
         tokens: turns.values().copied().fold(0, u64::saturating_add),
         sessions: u32::try_from(sessions.len()).unwrap_or(u32::MAX),
-        partial: budget.exhausted(),
+        partial: budget.exhausted() || cut_window,
     })
 }
 
@@ -1148,5 +1173,51 @@ mod tests {
         }
         let activity = local_activity(&dir.path().join("projects"), now()).unwrap();
         assert!(activity.partial);
+    }
+}
+
+#[cfg(test)]
+mod truncation_tests {
+    use super::*;
+    use crate::usage::local::testing::TempDir;
+    use chrono::TimeZone;
+    use serde_json::json;
+
+    fn now() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 11, 23, 18, 0, 0).unwrap()
+    }
+
+    fn turn(id: &str, at: &str) -> String {
+        json!({ "type": "assistant", "sessionId": "s", "timestamp": at,
+            "message": { "id": id, "usage": { "input_tokens": 10, "output_tokens": 0 } } })
+        .to_string()
+    }
+
+    #[test]
+    fn a_tail_cut_inside_the_window_is_partial() {
+        // Every record is inside the 5-hour window: cutting the file loses
+        // some of them.
+        let dir = TempDir::new("claude-cut-inside");
+        let lines: Vec<String> = (0..40)
+            .map(|index| turn(&format!("m{index}"), "2026-11-23T17:00:00Z"))
+            .collect();
+        dir.write("projects/p/a.jsonl", &lines.join("\n"));
+        let activity = scan_activity(&dir.path().join("projects"), now(), 1024).unwrap();
+        assert!(activity.tokens < 400, "only the tail was read");
+        assert!(activity.partial);
+    }
+
+    #[test]
+    fn a_tail_that_still_covers_the_window_is_complete() {
+        // Old records first, then the window: the cut only drops old ones.
+        let dir = TempDir::new("claude-cut-before");
+        let mut lines: Vec<String> = (0..40)
+            .map(|index| turn(&format!("old{index}"), "2026-11-23T08:00:00Z"))
+            .collect();
+        lines.push(turn("new", "2026-11-23T17:30:00Z"));
+        dir.write("projects/p/a.jsonl", &lines.join("\n"));
+        let activity = scan_activity(&dir.path().join("projects"), now(), 1024).unwrap();
+        assert_eq!(activity.tokens, 10);
+        assert!(!activity.partial);
     }
 }
