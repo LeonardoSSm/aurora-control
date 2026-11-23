@@ -118,10 +118,9 @@ export function useRailMotion() {
       // A closed panel may follow a lost pointer-leave: report again on the
       // next movement so hovering the same indicator reopens it.
       if (!active) reported = null;
-      target = [
-        active === "codex" ? slide : 0,
-        active === "claudeCode" ? slide : 0,
-      ];
+      // Shifts are per visible slot, in the order Rust placed them.
+      const slot = active ? placement.providers.indexOf(active) : -1;
+      target = [slot === 0 ? slide : 0, slot === 1 ? slide : 0];
       transition = undefined;
       setFrame({ placement, shifts, active });
       schedule();

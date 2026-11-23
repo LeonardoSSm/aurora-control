@@ -31,7 +31,9 @@ use super::adapter::{
 };
 use super::http::{Transport, Ureq, check_status};
 use super::local::{Budget, ReadError, env_dir, home_dir, read_limited, read_tail_within};
-use super::model::{LocalActivity, Origin, Provider, Quota, QuotaKind};
+use super::model::{
+    DiagnosticRow, DiagnosticState, LocalActivity, Origin, Provider, Quota, QuotaKind,
+};
 use super::session::Session;
 use super::time;
 
@@ -50,11 +52,14 @@ pub struct ClaudeCode<T: Transport> {
     /// `.claude.json`, which holds the account profile.
     profile: Option<PathBuf>,
     transport: T,
+    /// `CLAUDE_CONFIG_DIR` chose the folder (for the diagnosis).
+    custom_dir: bool,
 }
 
 impl ClaudeCode<Ureq> {
     pub fn detect() -> Self {
         let custom = env_dir("CLAUDE_CONFIG_DIR");
+        let custom_dir = custom.is_some();
         let home = home_dir();
         let config = custom
             .clone()
@@ -65,7 +70,10 @@ impl ClaudeCode<Ureq> {
             Some(dir) => Some(dir.join(".claude.json")),
             None => home.map(|home| home.join(".claude.json")),
         };
-        Self::new(config, profile, Ureq::new())
+        Self {
+            custom_dir,
+            ..Self::new(config, profile, Ureq::new())
+        }
     }
 }
 
@@ -75,6 +83,7 @@ impl<T: Transport> ClaudeCode<T> {
             config,
             profile,
             transport,
+            custom_dir: false,
         }
     }
 }
@@ -475,6 +484,151 @@ pub fn local_activity(projects: &Path, now: DateTime<Utc>) -> Option<LocalActivi
     })
 }
 
+/// Diagnosis of the Claude Code sign-in, from local files only. Reports
+/// states and masked labels; the token itself, file contents and account
+/// identifiers never leave this function.
+pub fn diagnose(
+    config: Option<&Path>,
+    profile_path: Option<&Path>,
+    custom_dir: bool,
+    now: DateTime<Utc>,
+) -> Vec<DiagnosticRow> {
+    use DiagnosticState::{Error, Info, Ok as Good, Warning};
+    let mut rows = vec![DiagnosticRow::new(
+        "Pasta de configuração",
+        Info,
+        if custom_dir {
+            "Definida por CLAUDE_CONFIG_DIR"
+        } else {
+            "Padrão do Claude Code (~\\.claude)"
+        },
+    )];
+    let Some(config) = config else {
+        rows.push(DiagnosticRow::new(
+            "Pasta de configuração",
+            Error,
+            "Pasta do usuário não encontrada",
+        ));
+        return rows;
+    };
+
+    let profile = read_profile(profile_path);
+    rows.push(
+        match (&profile.identity, &profile.account, profile.api_key) {
+            (Some(_), account, _) => DiagnosticRow::new(
+                "Perfil (.claude.json)",
+                Good,
+                format!(
+                    "Conta vinculada: {}",
+                    account.as_deref().unwrap_or("sem rótulo")
+                ),
+            ),
+            (None, _, true) => DiagnosticRow::new(
+                "Perfil (.claude.json)",
+                Info,
+                "Login por chave de API: não há cotas de assinatura",
+            ),
+            (None, _, false) => DiagnosticRow::new(
+                "Perfil (.claude.json)",
+                Warning,
+                "Sem conta OAuth no perfil",
+            ),
+        },
+    );
+
+    let label = "Credencial do CLI (.credentials.json)";
+    let text = match read_limited(&config.join(".credentials.json"), MAX_CREDENTIALS) {
+        Ok(text) => text,
+        Err(ReadError::Missing) => {
+            rows.push(DiagnosticRow::new(
+                label,
+                Warning,
+                "Arquivo ausente. Se o Claude Code roda dentro do app Claude Desktop, \
+                 a credencial é fornecida pelo app e não fica neste arquivo.",
+            ));
+            return rows;
+        }
+        Err(ReadError::TooLarge) => {
+            rows.push(DiagnosticRow::new(
+                label,
+                Error,
+                "Maior que o limite de 256 KiB",
+            ));
+            return rows;
+        }
+        Err(ReadError::Unreadable) => {
+            rows.push(DiagnosticRow::new(label, Error, "Arquivo ilegível"));
+            return rows;
+        }
+    };
+    let Ok(file) = serde_json::from_str::<CredentialsFile>(&text) else {
+        rows.push(DiagnosticRow::new(
+            label,
+            Error,
+            "Formato inesperado (o arquivo pode estar sendo regravado)",
+        ));
+        return rows;
+    };
+    let Some(oauth) = file.oauth else {
+        rows.push(DiagnosticRow::new(
+            label,
+            Warning,
+            "Sem sessão do Claude.ai",
+        ));
+        return rows;
+    };
+    let token = oauth
+        .access_token
+        .as_deref()
+        .is_some_and(|token| !token.is_empty());
+    rows.push(if token {
+        DiagnosticRow::new(label, Good, "Token presente (o valor nunca é exibido)")
+    } else {
+        DiagnosticRow::new(
+            label,
+            Warning,
+            "Token vazio: o CLI saiu da conta, ou o app Claude Desktop fornece a credencial",
+        )
+    });
+
+    let expiry = oauth.expires_at.and_then(time::from_epoch_millis);
+    rows.push(match expiry {
+        None => DiagnosticRow::new("Validade", Warning, "Sem data de expiração válida"),
+        Some(expiry) if expiry <= time::plus(now, EXPIRY_MARGIN) => DiagnosticRow {
+            at: Some(super::adapter::rfc3339(expiry)),
+            ..DiagnosticRow::new(
+                "Validade",
+                Warning,
+                "Expirado. Execute “claude” no terminal para renovar",
+            )
+        },
+        Some(expiry) => DiagnosticRow {
+            at: Some(super::adapter::rfc3339(expiry)),
+            ..DiagnosticRow::new("Validade", Good, "Válido")
+        },
+    });
+
+    rows.push(match &oauth.scopes {
+        Some(scopes) if scopes.iter().any(|scope| scope == "user:profile") => {
+            DiagnosticRow::new("Escopo user:profile", Good, "Concedido")
+        }
+        Some(_) => DiagnosticRow::new(
+            "Escopo user:profile",
+            Error,
+            "Ausente: token só de inferência (por exemplo, claude setup-token)",
+        ),
+        None => DiagnosticRow::new(
+            "Escopo user:profile",
+            Info,
+            "Não declarado: a consulta é tentada e uma recusa é informada",
+        ),
+    });
+    if let Some(plan) = oauth.subscription_type.as_deref().map(title_case) {
+        rows.push(DiagnosticRow::new("Plano", Info, plan));
+    }
+    rows
+}
+
 impl<T: Transport> ClaudeCode<T> {
     fn current_session(&self, now: DateTime<Utc>) -> Session {
         let Some(config) = &self.config else {
@@ -496,6 +650,14 @@ impl<T: Transport> UsageAdapter for ClaudeCode<T> {
 
     fn session(&self, now: DateTime<Utc>) -> Option<Session> {
         Some(self.current_session(now))
+    }
+    fn diagnostics(&self, now: DateTime<Utc>) -> Option<Vec<DiagnosticRow>> {
+        Some(diagnose(
+            self.config.as_deref(),
+            self.profile.as_deref(),
+            self.custom_dir,
+            now,
+        ))
     }
 
     fn fetch(&self, now: DateTime<Utc>) -> Outcome {

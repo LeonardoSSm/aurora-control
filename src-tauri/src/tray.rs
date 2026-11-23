@@ -12,9 +12,15 @@ pub fn setup(app: &App, demo: bool) -> tauri::Result<()> {
     let toggle = MenuItem::with_id(app, "toggle", "Mostrar / ocultar", true, None::<&str>)?;
     let left = MenuItem::with_id(app, "left", "Mover para a esquerda", true, None::<&str>)?;
     let right = MenuItem::with_id(app, "right", "Mover para a direita", true, None::<&str>)?;
+    let settings = MenuItem::with_id(app, "settings", "Configurações…", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "Encerrar", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&refresh, &toggle, &left, &right, &separator, &quit])?;
+    let menu = Menu::with_items(
+        app,
+        &[
+            &refresh, &toggle, &left, &right, &settings, &separator, &quit,
+        ],
+    )?;
 
     let mut tray = TrayIconBuilder::new()
         .tooltip(if demo {
@@ -29,6 +35,7 @@ pub fn setup(app: &App, demo: bool) -> tauri::Result<()> {
             "toggle" => windows::toggle(app),
             "left" => windows::set_side(app, Side::Left),
             "right" => windows::set_side(app, Side::Right),
+            "settings" => windows::show_settings(app),
             "quit" => app.exit(0),
             _ => {}
         })

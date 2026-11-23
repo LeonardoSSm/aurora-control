@@ -7,6 +7,8 @@ import type { RailShifts, Side } from "./railGeometry";
 export interface RailPlacement {
   side: Side;
   generation: number;
+  /** Visible indicators, from the top. */
+  providers: Provider[];
 }
 
 export interface RailActive {

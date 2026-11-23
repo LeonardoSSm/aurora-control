@@ -5,7 +5,9 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 
-use super::model::{ConsumptionWindow, LocalActivity, Origin, Provider, Quota, QuotaKind, Source};
+use super::model::{
+    ConsumptionWindow, DiagnosticRow, LocalActivity, Origin, Provider, Quota, QuotaKind, Source,
+};
 use super::session::{Fingerprint, Session};
 
 /// A normalized reading, before the scheduler decides its freshness.
@@ -91,6 +93,10 @@ pub trait UsageAdapter: Send + Sync + 'static {
     /// Lets the scheduler notice a logout, an account switch or a renewed
     /// credential before deciding whether a manual refresh may run early.
     fn session(&self, _now: DateTime<Utc>) -> Option<Session> {
+        None
+    }
+    /// A sign-in diagnosis from local files only, for the settings window.
+    fn diagnostics(&self, _now: DateTime<Utc>) -> Option<Vec<DiagnosticRow>> {
         None
     }
 }

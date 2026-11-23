@@ -40,6 +40,7 @@ function App() {
     <Rail
       state={state}
       side={frame.placement.side}
+      providers={frame.placement.providers}
       shifts={frame.shifts}
       active={frame.active}
       onPointer={onPointer}

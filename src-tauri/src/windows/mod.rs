@@ -1,13 +1,20 @@
-//! Overlay windows: the semicircular rail and the summary card.
+//! Overlay windows (the semicircular rail and the summary card) and the
+//! settings window.
 //!
 //! Every native mutation goes through [`controller`] (audit I05): callbacks,
 //! tray actions, IPC commands and timers submit jobs, and the jobs run in
 //! batches on the main thread, after the callback that produced them. Each job
 //! re-reads the state and re-validates generation and revision right before
 //! touching a window (audit I03).
+//!
+//! Geometry is one snapshot (monitor work area, scale and visible indicators)
+//! used for the HWND, the region, the hover zone and the summary. It is taken
+//! again when the DPI, the work area, the topology or the preferences change
+//! (audit I07).
 
 mod controller;
 mod hover;
+pub mod monitors;
 mod native;
 mod position;
 
@@ -20,28 +27,33 @@ use tauri::{
     App, AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
 
+use crate::preferences::{self, Store};
 use crate::sync::lock;
 use crate::usage::{Provider, Service, UsageUpdate};
 use controller::{Controller, Job};
 use hover::{Action, Hover, Selection};
 use position::{
-    Layout, RAIL_HEIGHT, RAIL_WIDTH, Rect, SLIDE, SUMMARY_MIN_HEIGHT, SUMMARY_WIDTH, anchor, layout,
+    Layout, RAIL_WIDTH, Rect, SLIDE, SUMMARY_MIN_HEIGHT, SUMMARY_WIDTH, anchor, layout_with,
+    rail_height,
 };
 
 pub use position::Side;
 
 const RAIL: &str = "rail";
 const SUMMARY: &str = "summary";
+const SETTINGS: &str = "settings";
 const SUMMARY_EVENT: &str = "summary-selection";
 const PLACEMENT_EVENT: &str = "rail-placement";
 const ACTIVE_EVENT: &str = "rail-active";
 const POINTER_RESET_EVENT: &str = "rail-pointer-reset";
 const USAGE_EVENT: &str = "usage-updated";
 
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct RailPlacement {
     side: Side,
     generation: u32,
+    /// Visible indicators, from the top.
+    providers: Vec<Provider>,
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -50,17 +62,35 @@ struct RailActive {
     provider: Option<Provider>,
 }
 
-/// Physical work area and scale of the monitor that holds the rail.
+/// Physical work area and scale of the monitor that holds the rail, and the
+/// number of visible indicators.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Geometry {
     work: Rect,
     scale: f64,
+    slots: usize,
 }
 
 impl Geometry {
     fn layout(&self, side: Side, anchor: i32, summary_height: i32) -> Layout {
-        layout(self.work, self.scale, side, anchor, summary_height)
+        layout_with(
+            self.work,
+            self.scale,
+            side,
+            self.slots,
+            anchor,
+            summary_height,
+        )
     }
+}
+
+/// Where the rail is, for the settings window.
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Placement {
+    pub monitor: Option<String>,
+    /// The preferred monitor is disconnected: the primary is used instead.
+    pub fallback: bool,
 }
 
 struct WindowState {
@@ -72,6 +102,16 @@ struct WindowState {
     shifts: [u8; 2],
     /// The geometry the rail was last placed with.
     geometry: Option<Geometry>,
+    monitor: Placement,
+}
+
+impl WindowState {
+    fn slot(&self, provider: Provider) -> Option<usize> {
+        self.placement
+            .providers
+            .iter()
+            .position(|visible| *visible == provider)
+    }
 }
 
 type State = Mutex<WindowState>;
@@ -87,13 +127,6 @@ struct SummarySelection {
     side: Side,
 }
 
-fn index(provider: Provider) -> usize {
-    match provider {
-        Provider::Codex => 0,
-        Provider::ClaudeCode => 1,
-    }
-}
-
 fn state(app: &AppHandle) -> std::sync::MutexGuard<'_, WindowState> {
     lock(app.state::<State>().inner())
 }
@@ -103,20 +136,22 @@ fn controller(app: &AppHandle) -> Arc<Controller> {
 }
 
 pub fn setup(app: &App) -> tauri::Result<()> {
-    // `AURORA_SIDE=left` starts on the left edge. The tray changes it at runtime.
-    let side = match std::env::var("AURORA_SIDE").as_deref() {
-        Ok("left") => Side::Left,
-        _ => Side::Right,
-    };
+    let stored = app.state::<Store>().get();
+    // Environment > preferences > defaults.
+    let (side, _) = preferences::effective_side(&stored);
+    let providers = stored.providers.visible();
+    app.state::<Service>().set_visible(&providers);
     app.manage(Mutex::new(WindowState {
         placement: RailPlacement {
             side,
             generation: 0,
+            providers,
         },
         hover: Hover::default(),
         summary: None,
         shifts: [0; 2],
         geometry: None,
+        monitor: Placement::default(),
     }));
     let controller = Arc::new(Controller::default());
     app.manage(Arc::clone(&controller));
@@ -127,7 +162,7 @@ pub fn setup(app: &App) -> tauri::Result<()> {
         "index.html",
         "Aurora Control",
         RAIL_WIDTH,
-        RAIL_HEIGHT,
+        rail_height(2),
     )?;
     let summary = create(
         app,
@@ -157,6 +192,13 @@ pub fn setup(app: &App) -> tauri::Result<()> {
         .name("window-controller".into())
         .spawn(move || controller::run(handle, dispatcher, execute))?;
     controller.watch_topology();
+    // Debug builds only: open the settings window at start, for validation
+    // scripts that cannot drive the tray menu.
+    if cfg!(debug_assertions)
+        && std::env::var_os("AURORA_OPEN_SETTINGS").is_some_and(|value| value == "1")
+    {
+        controller.submit(Job::OpenSettings);
+    }
 
     // Setup runs on the main thread outside any window callback.
     place_rail(app.handle(), side, true)
@@ -182,16 +224,19 @@ fn create(
         .skip_taskbar(true)
         .focused(false)
         .focusable(false)
-        .on_navigation(move |url| {
-            url.scheme() == "http"
-                && url.host_str() == Some("tauri.localhost")
-                && url.port().is_none()
-                && (url.path().strip_prefix('/') == Some(page)
-                    || (page == "index.html" && url.path() == "/"))
-        })
+        .on_navigation(move |url| same_page(url, page))
         .build()?;
     native::make_overlay(&window)?;
     Ok(window)
+}
+
+/// Navigation stays on the window's own bundled page.
+fn same_page(url: &tauri::Url, page: &str) -> bool {
+    url.scheme() == "http"
+        && url.host_str() == Some("tauri.localhost")
+        && url.port().is_none()
+        && (url.path().strip_prefix('/') == Some(page)
+            || (page == "index.html" && url.path() == "/"))
 }
 
 fn window(app: &AppHandle, label: &str) -> tauri::Result<WebviewWindow> {
@@ -199,21 +244,25 @@ fn window(app: &AppHandle, label: &str) -> tauri::Result<WebviewWindow> {
         .ok_or_else(|| io::Error::other(format!("Missing window: {label}")).into())
 }
 
-/// The geometry of the monitor that should hold the rail.
-fn target_geometry(rail: &WebviewWindow) -> tauri::Result<Geometry> {
-    let monitor = rail
-        .primary_monitor()?
-        .ok_or_else(|| io::Error::other("Primary monitor unavailable"))?;
-    let work = monitor.work_area();
-    Ok(Geometry {
-        work: Rect {
-            x: work.position.x,
-            y: work.position.y,
-            width: work.size.width as i32,
-            height: work.size.height as i32,
+/// The geometry the rail should use now: the preferred monitor when it is
+/// connected, otherwise the primary, with its own work area and DPI.
+fn target_geometry(app: &AppHandle) -> tauri::Result<(Geometry, Placement)> {
+    let preferred = app.state::<Store>().get().monitor.map(|monitor| monitor.id);
+    let monitors = monitors::enumerate();
+    let (monitor, fallback) = monitors::choose(&monitors, preferred.as_deref())
+        .ok_or_else(|| io::Error::other("No monitor available"))?;
+    let slots = state(app).placement.providers.len();
+    Ok((
+        Geometry {
+            work: monitor.work,
+            scale: monitor.scale,
+            slots,
         },
-        scale: monitor.scale_factor(),
-    })
+        Placement {
+            monitor: Some(monitor.id.clone()),
+            fallback,
+        },
+    ))
 }
 
 /// The geometry the rail is placed with, or the target when not placed yet.
@@ -221,18 +270,24 @@ fn current_geometry(app: &AppHandle) -> tauri::Result<Geometry> {
     if let Some(geometry) = state(app).geometry {
         return Ok(geometry);
     }
-    target_geometry(&window(app, RAIL)?)
+    Ok(target_geometry(app)?.0)
+}
+
+/// Where the rail is placed, for the settings window.
+pub fn placement(app: &AppHandle) -> Placement {
+    state(app).monitor.clone()
 }
 
 /// Places the collapsed rail with a fresh geometry snapshot. Main thread.
 fn place_rail(app: &AppHandle, side: Side, show: bool) -> tauri::Result<()> {
     let rail = window(app, RAIL)?;
-    let geometry = target_geometry(&rail)?;
+    let (geometry, monitor) = target_geometry(app)?;
     let layout = geometry.layout(side, 0, 0);
-    native::set_indicator_regions(&rail, layout.rail, layout.indicator_circles([0; 2]))?;
+    native::set_indicator_regions(&rail, layout.rail, &layout.visible_circles([0; 2]))?;
     native::place(&rail, layout.rail, show)?;
     let mut state = state(app);
     state.geometry = Some(geometry);
+    state.monitor = monitor;
     state.shifts = [0; 2];
     Ok(())
 }
@@ -243,7 +298,7 @@ fn publish_placement(app: &AppHandle, side: Side) -> tauri::Result<()> {
         state.placement.side = side;
         state.placement.generation = state.placement.generation.wrapping_add(1);
         state.shifts = [0; 2];
-        state.placement
+        state.placement.clone()
     };
     app.emit_to(RAIL, PLACEMENT_EVENT, placement)
 }
@@ -299,9 +354,10 @@ fn relayout(app: &AppHandle, side: Side) -> tauri::Result<()> {
     publish_placement(app, side)
 }
 
-/// Re-places the rail when the work area, scale or topology changed.
+/// Re-places the rail when the work area, scale or topology changed: the
+/// taskbar moved, a monitor was attached, removed or made primary.
 fn check_topology(app: &AppHandle) -> tauri::Result<()> {
-    let target = target_geometry(&window(app, RAIL)?)?;
+    let (target, _) = target_geometry(app)?;
     let (current, side) = {
         let state = state(app);
         (state.geometry, state.placement.side)
@@ -309,6 +365,36 @@ fn check_topology(app: &AppHandle) -> tauri::Result<()> {
     if current != Some(target) {
         relayout(app, side)?;
     }
+    Ok(())
+}
+
+/// Applies saved preferences: side, monitor and visible providers.
+fn apply_preferences(app: &AppHandle) -> tauri::Result<()> {
+    let stored = app.state::<Store>().get();
+    let (side, _) = preferences::effective_side(&stored);
+    let providers = stored.providers.visible();
+    app.state::<Service>().set_visible(&providers);
+    state(app).placement.providers = providers;
+    relayout(app, side)
+}
+
+/// Opens the settings window, or brings it forward.
+fn open_settings(app: &AppHandle) -> tauri::Result<()> {
+    if let Some(window) = app.get_webview_window(SETTINGS) {
+        window.unminimize()?;
+        window.show()?;
+        return window.set_focus();
+    }
+    WebviewWindowBuilder::new(app, SETTINGS, WebviewUrl::App("settings.html".into()))
+        .title("Aurora Control — Configurações")
+        .inner_size(560.0, 720.0)
+        .min_inner_size(480.0, 560.0)
+        .resizable(true)
+        .center()
+        .theme(Some(tauri::Theme::Dark))
+        .background_color(tauri::window::Color(9, 11, 16, 255))
+        .on_navigation(|url| same_page(url, "settings.html"))
+        .build()?;
     Ok(())
 }
 
@@ -372,7 +458,7 @@ fn motion(app: &AppHandle, generation: u32, shifts: [u8; 2]) -> tauri::Result<bo
         return Ok(false);
     }
     let layout = current_geometry(app)?.layout(side, 0, 0);
-    native::set_indicator_regions(&rail, layout.rail, layout.indicator_circles(shifts))?;
+    native::set_indicator_regions(&rail, layout.rail, &layout.visible_circles(shifts))?;
     let mut state = state(app);
     if state.placement.generation == generation {
         state.shifts = shifts;
@@ -383,23 +469,25 @@ fn motion(app: &AppHandle, generation: u32, shifts: [u8; 2]) -> tauri::Result<bo
 /// The open intent elapsed. Opens only when the physical cursor is on the
 /// indicator as drawn in the last accepted frame (audit I04).
 fn intent(app: &AppHandle, epoch: u32) -> tauri::Result<()> {
-    let (provider, side, shifts, generation) = {
+    let (provider, slot, side, shifts, generation) = {
         let state = state(app);
+        let provider = state.hover.intent_elapsed(epoch);
         (
-            state.hover.intent_elapsed(epoch),
+            provider,
+            provider.and_then(|provider| state.slot(provider)),
             state.placement.side,
             state.shifts,
             state.placement.generation,
         )
     };
-    let Some(provider) = provider else {
+    let (Some(provider), Some(slot)) = (provider, slot) else {
         return Ok(());
     };
     let rail = window(app, RAIL)?;
     let on_indicator = native::is_visible(&rail)? && {
         let shape = current_geometry(app)?
             .layout(side, 0, 0)
-            .indicator_shape(index(provider), shifts);
+            .indicator_shape(slot, shifts);
         native::cursor_position().is_some_and(|(x, y)| shape.contains(x, y))
     };
     if on_indicator {
@@ -412,22 +500,28 @@ fn intent(app: &AppHandle, epoch: u32) -> tauri::Result<()> {
 }
 
 fn check_hover_zone(app: &AppHandle) -> tauri::Result<()> {
-    let (provider, side, summary, shifts) = {
+    let (slot, side, summary, shifts) = {
         let state = state(app);
         (
-            state.hover.active(),
+            state
+                .hover
+                .active()
+                .and_then(|provider| state.slot(provider)),
             state.placement.side,
             state.summary,
             state.shifts,
         )
     };
-    let Some(provider) = provider else {
+    let Some(slot) = slot else {
+        if state(app).hover.active().is_some() {
+            // The active provider was hidden meanwhile.
+            return activate(app, None);
+        }
         return Ok(());
     };
-    let zone =
-        current_geometry(app)?
-            .layout(side, 0, 0)
-            .hover_zone(index(provider), shifts, summary);
+    let zone = current_geometry(app)?
+        .layout(side, 0, 0)
+        .hover_zone(slot, shifts, summary);
     // Without a cursor position, keep the panel open rather than flicker.
     let inside = native::cursor_position().is_none_or(|(x, y)| zone.contains(x, y));
     let close = state(app).hover.tick(inside, Instant::now());
@@ -435,11 +529,17 @@ fn check_hover_zone(app: &AppHandle) -> tauri::Result<()> {
 }
 
 fn show_summary_now(app: &AppHandle, revision: u64, height: i32) -> tauri::Result<()> {
-    let (side, provider) = {
+    let (side, slot) = {
         let state = state(app);
-        (state.placement.side, state.hover.confirm(revision))
+        (
+            state.placement.side,
+            state
+                .hover
+                .confirm(revision)
+                .and_then(|provider| state.slot(provider)),
+        )
     };
-    let Some(provider) = provider else {
+    let Some(slot) = slot else {
         return Ok(());
     };
     let rail = window(app, RAIL)?;
@@ -447,7 +547,7 @@ fn show_summary_now(app: &AppHandle, revision: u64, height: i32) -> tauri::Resul
         return Ok(());
     }
     let rect = current_geometry(app)?
-        .layout(side, anchor(index(provider)), height)
+        .layout(side, anchor(slot), height)
         .summary;
     if rect.width <= 0 || rect.height <= 0 {
         return Ok(());
@@ -489,6 +589,8 @@ fn execute(app: &AppHandle, batch: Vec<Job>) {
             Job::Intent(epoch) => intent(app, epoch),
             Job::HoverTick => check_hover_zone(app),
             Job::TopologyTick => check_topology(app),
+            Job::Preferences => apply_preferences(app),
+            Job::OpenSettings => open_settings(app),
         };
         report(result);
     }
@@ -498,13 +600,31 @@ pub fn toggle(app: &AppHandle) {
     controller(app).submit(Job::Toggle);
 }
 
+/// Moves the rail and remembers the side.
 pub fn set_side(app: &AppHandle, side: Side) {
+    let store = app.state::<Store>();
+    let saved = store.set(preferences::Preferences {
+        side,
+        ..store.get()
+    });
+    if let Err(error) = saved {
+        eprintln!("Aurora Control: could not save the side: {error}");
+    }
     controller(app).submit(Job::SetSide(side));
+}
+
+/// Re-applies the saved preferences.
+pub fn preferences_changed(app: &AppHandle) {
+    controller(app).submit(Job::Preferences);
+}
+
+pub fn show_settings(app: &AppHandle) {
+    controller(app).submit(Job::OpenSettings);
 }
 
 #[tauri::command]
 pub fn get_rail_placement(app: AppHandle) -> RailPlacement {
-    state(&app).placement
+    state(&app).placement.clone()
 }
 
 /// Applies one animation frame: how far each circle has slid inward. Runs as
@@ -540,6 +660,8 @@ pub fn rail_pointer(app: AppHandle, generation: u32, provider: Option<Provider>)
         if state.placement.generation != generation {
             return;
         }
+        // A hidden provider cannot be hovered.
+        let provider = provider.filter(|provider| state.slot(*provider).is_some());
         state.hover.pointer(provider)
     };
     match action {

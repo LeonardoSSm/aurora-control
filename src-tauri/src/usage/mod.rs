@@ -14,11 +14,15 @@ mod session;
 mod time;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 pub use adapter::UsageAdapter;
-pub use model::{Provider, Snapshot, Usage, UsageUpdate};
+#[cfg(test)]
+pub use local::testing;
+pub use local::{ReadError, read_limited};
+pub use model::{Diagnostics, Provider, Snapshot, Usage, UsageUpdate};
 
 use crate::sync::{lock, wait_timeout_while};
 use adapter::{FetchError, Outcome};
@@ -34,6 +38,8 @@ struct Slot {
     adapter: Box<dyn UsageAdapter>,
     tracker: Mutex<Tracker>,
     manual: Mutex<bool>,
+    /// Hidden providers are neither queried nor read from disk.
+    enabled: AtomicBool,
     wake: Condvar,
 }
 
@@ -64,6 +70,7 @@ impl Service {
                         )),
                         adapter,
                         manual: Mutex::new(false),
+                        enabled: AtomicBool::new(true),
                         wake: Condvar::new(),
                     })
                 })
@@ -135,6 +142,36 @@ impl Service {
             }
         }
     }
+
+    /// Shows only `visible` providers. Hidden ones stop querying and reading
+    /// local files; shown again, they refresh at once.
+    pub fn set_visible(&self, visible: &[Provider]) {
+        for slot in &self.slots {
+            let show = visible.contains(&slot.adapter.provider());
+            let was = slot.enabled.swap(show, Ordering::SeqCst);
+            if show && !was {
+                *lock(&slot.manual) = true;
+                slot.wake.notify_one();
+            }
+        }
+    }
+
+    /// The sign-in diagnosis of `provider`, with its latest issue.
+    pub fn diagnostics(&self, provider: Provider) -> Option<Diagnostics> {
+        let slot = self
+            .slots
+            .iter()
+            .find(|slot| slot.adapter.provider() == provider)?;
+        let now = Now::current();
+        let rows = guarded(|| slot.adapter.diagnostics(now.utc)).flatten()?;
+        let usage = lock(&slot.tracker).usage(now);
+        Some(Diagnostics {
+            provider,
+            rows,
+            issue: usage.issue,
+            checked_at: usage.checked_at,
+        })
+    }
 }
 
 /// Runs `job`, turning a panic into `None`. Nothing inside a job may unwind
@@ -162,6 +199,9 @@ fn worker(slot: &Slot, notify: &Notify) {
         };
 
         let now = Now::current();
+        if !slot.enabled.load(Ordering::SeqCst) {
+            continue;
+        }
         // Local files only: a logout, a switch or a renewed credential is
         // noticed before the gates are evaluated.
         let probe = guarded(|| slot.adapter.session(now.utc)).flatten();

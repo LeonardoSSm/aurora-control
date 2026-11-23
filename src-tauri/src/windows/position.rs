@@ -1,6 +1,6 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Side {
     Left,
@@ -17,6 +17,7 @@ pub const SLIDE: u8 = (INDICATOR_RADIUS + EXPANDED_INSET) as u8;
 pub const INDICATOR_GAP: i32 = 14;
 pub const INDICATOR_STEP: i32 = INDICATOR_DIAMETER + INDICATOR_GAP;
 pub const RAIL_WIDTH: i32 = SLIDE as i32 + INDICATOR_RADIUS + 2;
+#[cfg(test)]
 pub const RAIL_HEIGHT: i32 = INDICATOR_STEP + INDICATOR_DIAMETER;
 /// The Win32 region extends past the drawn circle, so its aliased edge falls on
 /// transparent pixels and the visible edge stays anti-aliased.
@@ -56,6 +57,8 @@ pub struct Layout {
     pub summary: Rect,
     side: Side,
     scale: f64,
+    /// Visible indicators, from the top (1 or 2).
+    slots: usize,
 }
 
 pub fn anchor(index: usize) -> i32 {
@@ -73,8 +76,14 @@ impl Layout {
                 Side::Right => RAIL_WIDTH - shift,
             };
             let top = index as i32 * INDICATOR_STEP;
-            let left = pixels(center_x - INDICATOR_RADIUS - REGION_PAD, self.scale);
-            let right = pixels(center_x + INDICATOR_RADIUS + REGION_PAD, self.scale);
+            // The rail may be narrower than its logical width on a tiny work area:
+            // the right side then anchors on the real window edge (audit I07).
+            let narrowing = match self.side {
+                Side::Left => 0,
+                Side::Right => self.rail.width - pixels(RAIL_WIDTH, self.scale),
+            };
+            let left = narrowing + pixels(center_x - INDICATOR_RADIUS - REGION_PAD, self.scale);
+            let right = narrowing + pixels(center_x + INDICATOR_RADIUS + REGION_PAD, self.scale);
             let upper = pixels(top - REGION_PAD, self.scale);
             let lower = pixels(top + INDICATOR_DIAMETER + REGION_PAD, self.scale);
             Rect {
@@ -84,6 +93,14 @@ impl Layout {
                 height: lower - upper,
             }
         })
+    }
+
+    /// The circles of the visible indicators, for the window region.
+    pub fn visible_circles(&self, shifts: [u8; 2]) -> Vec<Rect> {
+        self.indicator_circles(shifts)
+            .into_iter()
+            .take(self.slots)
+            .collect()
     }
 
     /// The input shape of one indicator on screen, for the slide offsets of
@@ -170,9 +187,28 @@ fn pixels(logical: i32, scale: f64) -> i32 {
 
 // All returned coordinates and dimensions are physical pixels. `anchor` and
 // `summary_height` are logical.
+/// Height of the rail for `slots` visible indicators, in logical pixels.
+pub fn rail_height(slots: usize) -> i32 {
+    slots.clamp(1, 2) as i32 * INDICATOR_STEP - INDICATOR_GAP
+}
+
+/// [`layout_with`] for both indicators.
+#[cfg(test)]
 pub fn layout(work: Rect, scale: f64, side: Side, anchor: i32, summary_height: i32) -> Layout {
+    layout_with(work, scale, side, 2, anchor, summary_height)
+}
+
+pub fn layout_with(
+    work: Rect,
+    scale: f64,
+    side: Side,
+    slots: usize,
+    anchor: i32,
+    summary_height: i32,
+) -> Layout {
+    let slots = slots.clamp(1, 2);
     let rail_width = pixels(RAIL_WIDTH, scale).min(work.width);
-    let rail_height = pixels(RAIL_HEIGHT, scale).min(work.height);
+    let rail_height = pixels(rail_height(slots), scale).min(work.height);
     let right = work.x + work.width;
     let rail = Rect {
         x: match side {
@@ -211,6 +247,7 @@ pub fn layout(work: Rect, scale: f64, side: Side, anchor: i32, summary_height: i
         summary,
         side,
         scale,
+        slots,
     }
 }
 
@@ -425,5 +462,45 @@ mod tests {
                 assert!(collapsed.contains(inside_x, edge_y), "{scale} {side:?}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod slot_tests {
+    use super::*;
+
+    const WORK: Rect = Rect {
+        x: 0,
+        y: 0,
+        width: 1920,
+        height: 1040,
+    };
+
+    #[test]
+    fn a_single_visible_provider_gets_a_single_circle_rail() {
+        assert_eq!(rail_height(2), RAIL_HEIGHT);
+        assert_eq!(rail_height(1), INDICATOR_DIAMETER);
+        let one = layout_with(WORK, 1.25, Side::Right, 1, anchor(0), 180);
+        assert_eq!(one.rail.height, 65);
+        assert_eq!(one.visible_circles([0, 0]).len(), 1);
+        assert_eq!(
+            layout_with(WORK, 1.0, Side::Left, 2, 0, 0)
+                .visible_circles([0, 0])
+                .len(),
+            2
+        );
+        // Out-of-range counts are clamped.
+        assert_eq!(layout_with(WORK, 1.0, Side::Left, 0, 0, 0).rail.height, 52);
+        assert_eq!(layout_with(WORK, 1.0, Side::Left, 9, 0, 0).rail.height, 118);
+    }
+
+    #[test]
+    fn i07_a_narrow_work_area_keeps_the_right_circle_on_the_window_edge() {
+        let narrow = Rect { width: 40, ..WORK };
+        let result = layout_with(narrow, 1.0, Side::Right, 2, 0, 0);
+        assert_eq!(result.rail.width, 40);
+        let circle = result.indicator_circles([0, 0])[0];
+        // Collapsed: the circle center sits on the window's right edge.
+        assert_eq!(circle.x + circle.width / 2, result.rail.width);
     }
 }

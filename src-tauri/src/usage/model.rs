@@ -189,3 +189,45 @@ pub struct UsageUpdate {
     pub sequence: u64,
     pub snapshot: Snapshot,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DiagnosticState {
+    Ok,
+    Info,
+    Warning,
+    Error,
+}
+
+/// One line of a sign-in diagnosis. Never carries a credential, a file
+/// content or an internal identifier: only states, masked labels and times.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticRow {
+    pub label: String,
+    pub state: DiagnosticState,
+    pub detail: String,
+    /// RFC 3339, when the line refers to a moment (for example an expiry).
+    pub at: Option<String>,
+}
+
+impl DiagnosticRow {
+    pub fn new(label: &str, state: DiagnosticState, detail: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            state,
+            detail: detail.into(),
+            at: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Diagnostics {
+    pub provider: Provider,
+    pub rows: Vec<DiagnosticRow>,
+    /// The latest attempt's issue, as shown on the rail.
+    pub issue: Option<Issue>,
+    pub checked_at: Option<String>,
+}

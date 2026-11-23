@@ -55,6 +55,7 @@ type RailProps = Parameters<typeof Rail>[0];
 
 const railProps: Omit<RailProps, "state"> = {
   side: "right",
+  providers: ["codex", "claudeCode"],
   shifts: collapsedShifts,
   active: null,
   onPointer: vi.fn(),

@@ -49,6 +49,9 @@ pub enum Job {
     Intent(u32),
     HoverTick,
     TopologyTick,
+    /// Preferences were saved: apply side, monitor and visible providers.
+    Preferences,
+    OpenSettings,
 }
 
 impl Job {
@@ -63,6 +66,8 @@ impl Job {
             Job::Intent(_) => "intent",
             Job::HoverTick => "hover",
             Job::TopologyTick => "topology",
+            Job::Preferences => "preferences",
+            Job::OpenSettings => "settings",
         }
     }
 }
