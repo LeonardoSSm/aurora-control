@@ -231,7 +231,9 @@ describe("summary", () => {
         }}
       />,
     );
-    expect(card).toContain("Desatualizado · registro local há 44 min");
+    expect(card).toContain(
+      "Desatualizado · registro local sem conta verificada há 44 min",
+    );
     expect(card).toContain("A sessão do Codex expirou");
     expect(card).toContain('data-connection="stale"');
   });

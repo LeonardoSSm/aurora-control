@@ -19,7 +19,6 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::Deserialize;
@@ -32,6 +31,8 @@ use super::adapter::{
 use super::http::{Transport, Ureq, check_status};
 use super::local::{env_dir, home_dir, read_tail};
 use super::model::{LocalActivity, Origin, Provider, Quota, QuotaKind};
+use super::session::Session;
+use super::time;
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const OAUTH_BETA: &str = "oauth-2025-04-20";
@@ -100,11 +101,15 @@ struct ProfileFile {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct OAuthAccount {
+    account_uuid: Option<String>,
+    organization_uuid: Option<String>,
     email_address: Option<String>,
     organization_name: Option<String>,
 }
 
 struct Profile {
+    /// Stable account key parts (never displayed), when the profile has them.
+    identity: Option<Vec<String>>,
     account: Option<String>,
     api_key: bool,
 }
@@ -113,21 +118,38 @@ fn read_profile(path: Option<&Path>) -> Profile {
     let file = path
         .and_then(|path| fs::read_to_string(path).ok())
         .and_then(|text| serde_json::from_str::<ProfileFile>(&text).ok());
-    match file {
-        Some(file) => Profile {
-            account: file.oauth_account.and_then(|account| {
-                account
-                    .email_address
-                    .filter(|email| !email.is_empty())
-                    .map(|email| mask_account(&email))
-                    .or(account.organization_name)
-            }),
-            api_key: file.primary_api_key.is_some(),
-        },
-        None => Profile {
+    let Some(file) = file else {
+        return Profile {
+            identity: None,
             account: None,
             api_key: false,
-        },
+        };
+    };
+    let api_key = file.primary_api_key.is_some();
+    let Some(account) = file.oauth_account else {
+        return Profile {
+            identity: None,
+            account: None,
+            api_key,
+        };
+    };
+    let email = account.email_address.filter(|email| !email.is_empty());
+    // The account and organization UUIDs identify the session. The e-mail is
+    // a weaker fallback for older profiles. Labels never identify.
+    let identity = match (&account.account_uuid, &email) {
+        (Some(uuid), _) if !uuid.is_empty() => Some(vec![
+            uuid.clone(),
+            account.organization_uuid.clone().unwrap_or_default(),
+        ]),
+        (_, Some(email)) => Some(vec![email.to_lowercase()]),
+        _ => None,
+    };
+    Profile {
+        identity,
+        account: email
+            .map(|email| mask_account(&email))
+            .or(account.organization_name),
+        api_key,
     }
 }
 
@@ -136,40 +158,60 @@ struct SignIn {
     plan: Option<String>,
 }
 
-fn read_sign_in(
-    config: &Path,
-    api_key: bool,
-    now: DateTime<Utc>,
-) -> Result<SignIn, (FetchError, Option<String>)> {
+/// Why no request can be made, what it proves about the session, and the
+/// plan label when the credentials file still names one.
+struct NoSignIn {
+    error: FetchError,
+    signed_out: bool,
+    plan: Option<String>,
+}
+
+impl NoSignIn {
+    fn signed_out(error: FetchError) -> Self {
+        Self {
+            error,
+            signed_out: true,
+            plan: None,
+        }
+    }
+
+    fn unverified(error: FetchError, plan: Option<String>) -> Self {
+        Self {
+            error,
+            signed_out: false,
+            plan,
+        }
+    }
+}
+
+fn read_sign_in(config: &Path, api_key: bool, now: DateTime<Utc>) -> Result<SignIn, NoSignIn> {
+    let absent = || {
+        NoSignIn::signed_out(if api_key {
+            FetchError::Unsupported
+        } else {
+            FetchError::AuthMissing
+        })
+    };
     let text = match fs::read_to_string(config.join(".credentials.json")) {
         Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err((
-                if api_key {
-                    FetchError::Unsupported
-                } else {
-                    FetchError::AuthMissing
-                },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(absent()),
+        Err(_) => {
+            return Err(NoSignIn::unverified(
+                FetchError::Malformed("credentials unreadable".into()),
                 None,
             ));
         }
-        Err(_) => return Err((FetchError::Malformed("credentials unreadable".into()), None)),
     };
-    let file: CredentialsFile = serde_json::from_str(&text)
-        .map_err(|_| (FetchError::Malformed("credentials schema".into()), None))?;
+    let file: CredentialsFile = serde_json::from_str(&text).map_err(|_| {
+        NoSignIn::unverified(FetchError::Malformed("credentials schema".into()), None)
+    })?;
     let Some(oauth) = file.oauth else {
-        return Err((
-            if api_key {
-                FetchError::Unsupported
-            } else {
-                FetchError::AuthMissing
-            },
-            None,
-        ));
+        return Err(absent());
     };
     let plan = oauth.subscription_type.as_deref().map(title_case);
     let Some(access_token) = oauth.access_token.filter(|token| !token.is_empty()) else {
-        return Err((FetchError::AuthMissing, plan));
+        // The CLI logged out and blanked its token.
+        return Err(NoSignIn::signed_out(FetchError::AuthMissing));
     };
     // `user:profile` grants access to the usage endpoint. Tokens minted for
     // inference only (for example by `claude setup-token`) cannot read it.
@@ -178,15 +220,25 @@ fn read_sign_in(
         .as_ref()
         .is_some_and(|scopes| !scopes.iter().any(|scope| scope == "user:profile"))
     {
-        return Err((FetchError::Unsupported, plan));
+        return Err(NoSignIn::unverified(FetchError::Unsupported, plan));
     }
-    let expires_at = oauth
-        .expires_at
-        .and_then(|ms| DateTime::from_timestamp_millis(ms as i64));
-    if expires_at.is_none_or(|expiry| expiry <= now + EXPIRY_MARGIN) {
-        return Err((FetchError::AuthExpired, plan));
+    let expires_at = oauth.expires_at.and_then(time::from_epoch_millis);
+    if expires_at.is_none_or(|expiry| expiry <= time::plus(now, EXPIRY_MARGIN)) {
+        return Err(NoSignIn::unverified(FetchError::AuthExpired, plan));
     }
     Ok(SignIn { access_token, plan })
+}
+
+/// The session for a sign-in that exists, identified by the profile.
+fn session(profile: &Profile, credential: &str) -> Session {
+    match &profile.identity {
+        Some(parts) => {
+            let mut key: Vec<&str> = vec!["claude"];
+            key.extend(parts.iter().map(String::as_str));
+            Session::account(&key, credential)
+        }
+        None => Session::Unverified,
+    }
 }
 
 fn known_window(key: &str) -> Option<(&'static str, &'static str, u32)> {
@@ -287,8 +339,8 @@ pub fn parse_usage(body: &str) -> Result<Vec<Quota>, FetchError> {
 /// the last five hours. Streamed turns repeat the same message id, so each id
 /// counts once. Cache reads are excluded: they re-read context already counted.
 pub fn local_activity(projects: &Path, now: DateTime<Utc>) -> Option<LocalActivity> {
-    let since = now - TimeDelta::minutes(i64::from(ACTIVITY_MINUTES));
-    let since_file = SystemTime::from(since);
+    let since = time::minus(now, TimeDelta::minutes(i64::from(ACTIVITY_MINUTES)));
+    let since_file = time::system_time(since)?;
     let mut seen = HashSet::new();
     let mut sessions = HashSet::new();
     let mut tokens = 0u64;
@@ -331,14 +383,14 @@ pub fn local_activity(projects: &Path, now: DateTime<Utc>) -> Option<LocalActivi
                     continue;
                 }
                 let usage = &message["usage"];
-                tokens += [
+                tokens = [
                     "input_tokens",
                     "cache_creation_input_tokens",
                     "output_tokens",
                 ]
                 .iter()
                 .filter_map(|key| usage[*key].as_u64())
-                .sum::<u64>();
+                .fold(tokens, u64::saturating_add);
                 if let Some(session) = record["sessionId"].as_str() {
                     sessions.insert(session.to_owned());
                 }
@@ -359,7 +411,7 @@ impl<T: Transport> UsageAdapter for ClaudeCode<T> {
 
     fn fetch(&self, now: DateTime<Utc>) -> Outcome {
         let Some(config) = &self.config else {
-            return Outcome::failed(FetchError::AuthMissing);
+            return Outcome::signed_out(FetchError::AuthMissing);
         };
         let profile = read_profile(self.profile.as_deref());
         let mut outcome = Outcome {
@@ -370,12 +422,22 @@ impl<T: Transport> UsageAdapter for ClaudeCode<T> {
 
         let sign_in = match read_sign_in(config, profile.api_key, now) {
             Ok(sign_in) => sign_in,
-            Err((error, plan)) => {
-                outcome.plan = plan;
-                outcome.result = Some(Err(error));
+            Err(failure) => {
+                if failure.signed_out {
+                    // No session: neither its labels nor its quotas apply.
+                    outcome.session = Session::SignedOut;
+                    outcome.account = None;
+                } else {
+                    // A sign-in exists (expired, restricted or unreadable).
+                    // Its account is the profile's, when the profile has one.
+                    outcome.session = session(&profile, "");
+                    outcome.plan = failure.plan;
+                }
+                outcome.result = Some(Err(failure.error));
                 return outcome;
             }
         };
+        outcome.session = session(&profile, &sign_in.access_token);
         outcome.plan = sign_in.plan.clone();
         let response = self.transport.get(
             USAGE_URL,
@@ -390,6 +452,7 @@ impl<T: Transport> UsageAdapter for ClaudeCode<T> {
             check_status(response, now)
                 .and_then(|response| parse_usage(&response.body))
                 .map(|quotas| Fetched {
+                    identity: outcome.session.identity(),
                     account: outcome.account.clone(),
                     plan: outcome.plan.clone(),
                     origin: Origin::Api,
@@ -577,6 +640,97 @@ mod tests {
             adapter.fetch(now()).result,
             Some(Err(FetchError::Malformed(_)))
         ));
+    }
+
+    fn profile(dir: &TempDir, uuid: &str, email: &str) {
+        dir.write(
+            "profile.json",
+            &json!({ "oauthAccount": {
+                "accountUuid": uuid, "organizationUuid": "org-1", "emailAddress": email } })
+            .to_string(),
+        );
+    }
+
+    fn credentials(dir: &TempDir, token: &str) {
+        dir.write(
+            "config/.credentials.json",
+            &json!({ "claudeAiOauth": {
+                "accessToken": token,
+                "expiresAt": now().timestamp_millis() + 3_600_000,
+                "scopes": SCOPES,
+                "subscriptionType": "pro" } })
+            .to_string(),
+        );
+    }
+
+    fn adapter_in(dir: &TempDir, script: Script) -> ClaudeCode<Script> {
+        ClaudeCode::new(
+            Some(dir.path().join("config")),
+            Some(dir.path().join("profile.json")),
+            script,
+        )
+    }
+
+    #[test]
+    fn b01_identity_comes_from_the_account_uuid_not_the_label_or_token() {
+        let dir = TempDir::new("claude-identity");
+        let adapter = adapter_in(
+            &dir,
+            Script::new((0..4).map(|_| Err(TransportError::Network)).collect()),
+        );
+        profile(&dir, "uuid-a", "dev@example.com");
+        credentials(&dir, "token-1");
+        let first = adapter.fetch(now());
+        credentials(&dir, "token-2");
+        let renewed = adapter.fetch(now());
+        assert!(first.session.identity().is_some());
+        assert_eq!(first.session.identity(), renewed.session.identity());
+        assert_ne!(first.session, renewed.session);
+        // Same masked label, different account.
+        profile(&dir, "uuid-b", "dan@example.com");
+        let other = adapter.fetch(now());
+        assert_eq!(other.account, first.account, "labels collide");
+        assert_ne!(other.session.identity(), first.session.identity());
+        // Without a profile the account cannot be verified.
+        std::fs::remove_file(dir.path().join("profile.json")).unwrap();
+        assert_eq!(adapter.fetch(now()).session, Session::Unverified);
+    }
+
+    #[test]
+    fn b01_logout_is_a_signed_out_session_without_labels() {
+        let dir = TempDir::new("claude-logout");
+        profile(&dir, "uuid-a", "dev@example.com");
+        let adapter = adapter_in(&dir, Script::new(vec![]));
+        let missing = adapter.fetch(now());
+        assert_eq!(missing.session, Session::SignedOut);
+        assert_eq!(missing.account, None);
+        credentials(&dir, "");
+        let blank = adapter.fetch(now());
+        assert_eq!(blank.session, Session::SignedOut);
+        assert_eq!(blank.result, Some(Err(FetchError::AuthMissing)));
+        // A partially written file proves nothing.
+        dir.write("config/.credentials.json", r#"{"claudeAiOauth": {"acc"#);
+        assert!(adapter.fetch(now()).session.identity().is_some());
+        assert_eq!(adapter.transport.request_count(), 0);
+    }
+
+    #[test]
+    fn b02_an_expiry_outside_the_range_is_treated_as_expired() {
+        let dir = TempDir::new("claude-expiry-range");
+        profile(&dir, "uuid-a", "dev@example.com");
+        for expires_at in [json!(1e300), json!(-1e300), json!(9.3e18)] {
+            dir.write(
+                "config/.credentials.json",
+                &json!({ "claudeAiOauth": { "accessToken": "t", "expiresAt": expires_at,
+                    "scopes": SCOPES } })
+                .to_string(),
+            );
+            let adapter = adapter_in(&dir, Script::new(vec![]));
+            assert_eq!(
+                adapter.fetch(now()).result,
+                Some(Err(FetchError::AuthExpired))
+            );
+        }
     }
 
     #[test]

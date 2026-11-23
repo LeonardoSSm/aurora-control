@@ -26,6 +26,8 @@ use super::adapter::{
 use super::http::{Transport, Ureq, check_status};
 use super::local::{env_dir, home_dir, jwt_claims, read_tail};
 use super::model::{Origin, Provider, Quota, QuotaKind};
+use super::session::Session;
+use super::time;
 
 const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const AUTH_CLAIM: &str = "https://api.openai.com/auth";
@@ -35,6 +37,8 @@ const ROLLOUT_TAIL: u64 = 512 * 1024;
 const ROLLOUT_FILES: usize = 6;
 /// Older observations describe windows that have all renewed.
 const ROLLOUT_MAX_AGE: TimeDelta = TimeDelta::days(8);
+/// Tolerated clock skew for records stamped slightly in the future.
+const ROLLOUT_FUTURE_SKEW: TimeDelta = TimeDelta::minutes(5);
 
 pub struct Codex<T: Transport> {
     home: Option<PathBuf>,
@@ -72,20 +76,34 @@ struct SignIn {
     access_token: String,
     account_id: String,
     expires_at: Option<DateTime<Utc>>,
+    session: Session,
     account: Option<String>,
     plan: Option<String>,
 }
 
-fn read_sign_in(home: &Path) -> Result<SignIn, FetchError> {
+/// A failed sign-in read and what it proves about the session.
+fn signed_out(error: FetchError) -> (FetchError, Session) {
+    (error, Session::SignedOut)
+}
+
+fn unverified(error: FetchError) -> (FetchError, Session) {
+    (error, Session::Unverified)
+}
+
+fn read_sign_in(home: &Path) -> Result<SignIn, (FetchError, Session)> {
     let text = match fs::read_to_string(home.join("auth.json")) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(FetchError::AuthMissing);
+            return Err(signed_out(FetchError::AuthMissing));
         }
-        Err(_) => return Err(FetchError::Malformed("auth.json unreadable".into())),
+        Err(_) => {
+            return Err(unverified(FetchError::Malformed(
+                "auth.json unreadable".into(),
+            )));
+        }
     };
     let file: AuthFile = serde_json::from_str(&text)
-        .map_err(|_| FetchError::Malformed("auth.json schema".into()))?;
+        .map_err(|_| unverified(FetchError::Malformed("auth.json schema".into())))?;
     let tokens = file.tokens;
     let access_token = tokens
         .as_ref()
@@ -96,16 +114,23 @@ fn read_sign_in(home: &Path) -> Result<SignIn, FetchError> {
         account_id.filter(|value| !value.is_empty()),
     ) else {
         // An API key has no ChatGPT plan windows to report.
-        return Err(if file.api_key.is_some() {
+        return Err(signed_out(if file.api_key.is_some() {
             FetchError::Unsupported
         } else {
             FetchError::AuthMissing
-        });
+        }));
     };
 
     let identity = tokens
         .and_then(|tokens| tokens.id_token)
         .and_then(|token| jwt_claims(&token));
+    // The workspace account plus the user inside it. Display labels play no
+    // part, so a renamed or re-masked e-mail never looks like a new account.
+    let user = identity
+        .as_ref()
+        .and_then(|claims| claims["sub"].as_str().or_else(|| claims["email"].as_str()))
+        .unwrap_or_default();
+    let session = Session::account(&["codex", &account_id, user], &access_token);
     let account = identity
         .as_ref()
         .and_then(|claims| claims["email"].as_str())
@@ -121,6 +146,7 @@ fn read_sign_in(home: &Path) -> Result<SignIn, FetchError> {
         access_token,
         account_id,
         expires_at,
+        session,
         account,
         plan,
     })
@@ -143,15 +169,18 @@ fn api_window(value: &Value, id: &str, prefix: Option<&str>, now: DateTime<Utc>)
     let used = value.get("used_percent")?.as_f64()?;
     let minutes = value["limit_window_seconds"]
         .as_f64()
-        .map(|seconds| (seconds / 60.0).round() as u32);
-    let resets_at = value["reset_at"]
-        .as_f64()
-        .and_then(|epoch| DateTime::from_timestamp(epoch as i64, 0))
-        .or_else(|| {
-            value["reset_after_seconds"]
-                .as_f64()
-                .map(|seconds| now + TimeDelta::seconds(seconds as i64))
-        });
+        .and_then(time::window_minutes);
+    let resets_at = time::plausible_reset(
+        value["reset_at"]
+            .as_f64()
+            .and_then(time::from_epoch)
+            .or_else(|| {
+                value["reset_after_seconds"]
+                    .as_f64()
+                    .and_then(|seconds| time::offset(now, seconds))
+            }),
+        now,
+    );
     let base = minutes.map(window_label).unwrap_or_else(|| "Janela".into());
     Some(Quota {
         id: id.into(),
@@ -235,10 +264,11 @@ pub fn parse_usage(body: &str, now: DateTime<Utc>) -> Result<ParsedUsage, FetchE
             kind: QuotaKind::Credits,
             percent_used: percent(used),
             duration_minutes: None,
-            resets_at: spend["reset_at"]
-                .as_f64()
-                .and_then(|epoch| DateTime::from_timestamp(epoch as i64, 0))
-                .map(rfc3339),
+            resets_at: time::plausible_reset(
+                spend["reset_at"].as_f64().and_then(time::from_epoch),
+                now,
+            )
+            .map(rfc3339),
         });
     }
     if quotas.is_empty() {
@@ -254,15 +284,19 @@ fn rollout_window(value: &Value, id: &str, observed: DateTime<Utc>) -> Option<Qu
     let used = value.get("used_percent")?.as_f64()?;
     let minutes = value["window_minutes"]
         .as_u64()
-        .map(|minutes| minutes as u32);
-    let resets_at = value["resets_at"]
-        .as_i64()
-        .and_then(|epoch| DateTime::from_timestamp(epoch, 0))
-        .or_else(|| {
-            value["resets_in_seconds"]
-                .as_i64()
-                .map(|seconds| observed + TimeDelta::seconds(seconds))
-        });
+        .and_then(|minutes| u32::try_from(minutes).ok())
+        .filter(|minutes| (1..=time::MAX_WINDOW_MINUTES).contains(minutes));
+    let resets_at = time::plausible_reset(
+        value["resets_at"]
+            .as_f64()
+            .and_then(time::from_epoch)
+            .or_else(|| {
+                value["resets_in_seconds"]
+                    .as_f64()
+                    .and_then(|seconds| time::offset(observed, seconds))
+            }),
+        observed,
+    );
     Some(Quota {
         id: id.into(),
         label: minutes.map(window_label).unwrap_or_else(|| "Janela".into()),
@@ -290,7 +324,10 @@ pub fn parse_rollout(text: &str, now: DateTime<Utc>) -> Option<Fetched> {
             let observed = DateTime::parse_from_rfc3339(record["timestamp"].as_str()?)
                 .ok()?
                 .with_timezone(&Utc);
-            if now - observed > ROLLOUT_MAX_AGE {
+            // Ancient records describe renewed windows; records from the
+            // future would always look like the newest observation.
+            let age = now.signed_duration_since(observed);
+            if age > ROLLOUT_MAX_AGE || age < -ROLLOUT_FUTURE_SKEW {
                 return None;
             }
             let quotas: Vec<Quota> = [
@@ -305,6 +342,8 @@ pub fn parse_rollout(text: &str, now: DateTime<Utc>) -> Option<Fetched> {
             })
             .collect();
             (!quotas.is_empty()).then(|| Fetched {
+                // Rollout records carry no account: never attributed.
+                identity: None,
                 account: None,
                 plan: limits["plan_type"].as_str().map(title_case),
                 origin: Origin::SessionLog,
@@ -373,13 +412,19 @@ impl<T: Transport> UsageAdapter for Codex<T> {
 
     fn fetch(&self, now: DateTime<Utc>) -> Outcome {
         let Some(home) = &self.home else {
-            return Outcome::failed(FetchError::AuthMissing);
+            return Outcome::signed_out(FetchError::AuthMissing);
         };
         let sign_in = match read_sign_in(home) {
             Ok(sign_in) => sign_in,
-            Err(error) => return Outcome::failed(error),
+            Err((error, session)) => {
+                return Outcome {
+                    session,
+                    ..Outcome::failed(error)
+                };
+            }
         };
         let mut outcome = Outcome {
+            session: sign_in.session,
             account: sign_in.account.clone(),
             plan: sign_in.plan.clone(),
             ..Outcome::default()
@@ -387,7 +432,7 @@ impl<T: Transport> UsageAdapter for Codex<T> {
 
         let result = if sign_in
             .expires_at
-            .is_some_and(|exp| exp <= now + EXPIRY_MARGIN)
+            .is_some_and(|exp| exp <= time::plus(now, EXPIRY_MARGIN))
         {
             Err(FetchError::AuthExpired)
         } else {
@@ -405,6 +450,7 @@ impl<T: Transport> UsageAdapter for Codex<T> {
         drop(sign_in);
 
         outcome.result = Some(result.map(|(quotas, account, plan)| Fetched {
+            identity: outcome.session.identity(),
             account: account.or_else(|| outcome.account.clone()),
             plan: plan.or_else(|| outcome.plan.clone()),
             origin: Origin::Api,
@@ -412,11 +458,8 @@ impl<T: Transport> UsageAdapter for Codex<T> {
             observed_at: now,
         }));
         if matches!(outcome.result, Some(Err(_))) {
-            outcome.fallback = rollout_fallback(home, now).map(|mut fallback| {
-                fallback.account = outcome.account.clone();
-                fallback.plan = fallback.plan.or_else(|| outcome.plan.clone());
-                fallback
-            });
+            // Unattributed history: no account label is attached to it.
+            outcome.fallback = rollout_fallback(home, now);
         }
         outcome
     }
@@ -581,8 +624,99 @@ mod tests {
         let fallback = outcome.fallback.unwrap();
         assert_eq!(fallback.origin, Origin::SessionLog);
         assert_eq!(fallback.quotas[0].percent_used, 53);
-        assert_eq!(fallback.account.as_deref(), Some("d•••@example.com"));
+        // B01: the rollout has no verifiable account link.
+        assert_eq!(fallback.account, None);
+        assert_eq!(fallback.identity, None);
         assert_eq!(codex.transport.request_count(), 0);
+    }
+
+    fn auth(dir: &TempDir, account_id: &str, sub: &str, access: &str) {
+        let id = jwt(&json!({ "sub": sub, "email": "dev@example.com" }));
+        let access = jwt(&json!({ "exp": now().timestamp() + 3600, "nonce": access }));
+        dir.write(
+            "auth.json",
+            &json!({ "auth_mode": "chatgpt", "tokens": {
+                "access_token": access, "account_id": account_id, "id_token": id } })
+            .to_string(),
+        );
+    }
+
+    #[test]
+    fn b01_session_identity_follows_the_account_not_the_label_or_token() {
+        let dir = TempDir::new("codex-identity");
+        let codex = Codex::new(
+            Some(dir.path().into()),
+            Script::new(vec![
+                Err(TransportError::Network),
+                Err(TransportError::Network),
+                Err(TransportError::Network),
+                Err(TransportError::Network),
+            ]),
+        );
+        auth(&dir, "acct-1", "user-1", "t1");
+        let first = codex.fetch(now()).session;
+        auth(&dir, "acct-1", "user-1", "t2");
+        let renewed = codex.fetch(now()).session;
+        assert_ne!(first, renewed, "credential version changes");
+        assert_eq!(first.identity(), renewed.identity(), "same account");
+        assert!(first.identity().is_some());
+        // Same e-mail label, different user or workspace: another account.
+        auth(&dir, "acct-1", "user-2", "t1");
+        assert_ne!(codex.fetch(now()).session.identity(), first.identity());
+        auth(&dir, "acct-2", "user-1", "t1");
+        assert_ne!(codex.fetch(now()).session.identity(), first.identity());
+    }
+
+    #[test]
+    fn b01_logout_and_api_key_prove_a_signed_out_session_but_a_broken_file_does_not() {
+        let dir = TempDir::new("codex-session");
+        let codex = Codex::new(Some(dir.path().into()), Script::new(vec![]));
+        assert_eq!(codex.fetch(now()).session, Session::SignedOut);
+        dir.write("auth.json", r#"{"OPENAI_API_KEY":"sk-test","tokens":null}"#);
+        assert_eq!(codex.fetch(now()).session, Session::SignedOut);
+        dir.write("auth.json", r#"{"tokens": {"access_token": "#);
+        let partial = codex.fetch(now());
+        assert_eq!(partial.session, Session::Unverified);
+        assert!(matches!(
+            partial.result,
+            Some(Err(FetchError::Malformed(_)))
+        ));
+        assert_eq!(codex.transport.request_count(), 0);
+    }
+
+    #[test]
+    fn b02_out_of_range_times_in_the_response_never_panic() {
+        let body = json!({ "rate_limit": {
+            "primary_window": { "used_percent": 5, "limit_window_seconds": 1e300, "reset_after_seconds": 1e300 },
+            "secondary_window": { "used_percent": 6, "limit_window_seconds": -5, "reset_at": 9.3e18 }
+        }, "spend_control": { "individual_limit": { "used_percent": 1, "reset_at": -1e300 } } });
+        let (quotas, _, _) = parse_usage(&body.to_string(), now()).unwrap();
+        assert!(quotas.iter().all(|quota| quota.resets_at.is_none()));
+        assert!(quotas.iter().all(|quota| quota.duration_minutes.is_none()));
+
+        let rollout = r#"{"timestamp":"2026-11-23T17:00:00Z","rate_limits":{"primary":{"used_percent":9,"window_minutes":18446744073709551615,"resets_in_seconds":9223372036854775807}}}"#;
+        let fetched = parse_rollout(rollout, now()).unwrap();
+        assert_eq!(fetched.quotas[0].resets_at, None);
+        assert_eq!(fetched.quotas[0].duration_minutes, None);
+        let rollout = r#"{"timestamp":"2026-11-23T17:00:00Z","rate_limits":{"primary":{"used_percent":9,"resets_at":-9223372036854775808}}}"#;
+        assert_eq!(
+            parse_rollout(rollout, now()).unwrap().quotas[0].resets_at,
+            None
+        );
+        // A record stamped in the future is ignored.
+        let future = r#"{"timestamp":"2027-01-01T00:00:00Z","rate_limits":{"primary":{"used_percent":9,"window_minutes":300}}}"#;
+        assert_eq!(parse_rollout(future, now()), None);
+    }
+
+    #[test]
+    fn b02_an_access_token_expiring_at_the_end_of_time_does_not_panic() {
+        let dir = TempDir::new("codex-exp-max");
+        signed_in(&dir, i64::MAX);
+        let codex = Codex::new(
+            Some(dir.path().into()),
+            Script::new(vec![Err(TransportError::Network)]),
+        );
+        assert_eq!(codex.fetch(now()).result, Some(Err(FetchError::Network)));
     }
 
     #[test]

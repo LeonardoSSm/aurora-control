@@ -195,7 +195,9 @@ export function connectionText(usage: Usage, now: Date) {
       return ago ? `Conectado · atualizado ${ago}` : "Conectado";
     case "stale": {
       const from =
-        usage.origin === "sessionLog" ? "registro local" : "última leitura";
+        usage.origin === "sessionLog"
+          ? "registro local sem conta verificada"
+          : "última leitura";
       return ago ? `Desatualizado · ${from} ${ago}` : "Desatualizado";
     }
     case "offline":

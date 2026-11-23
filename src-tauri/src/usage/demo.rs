@@ -6,6 +6,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 
 use super::adapter::{Fetched, Outcome, UsageAdapter, rfc3339};
 use super::model::{LocalActivity, Origin, Provider, Quota, QuotaKind, Source};
+use super::session::Session;
 
 pub struct DemoAdapter {
     provider: Provider,
@@ -110,8 +111,12 @@ impl UsageAdapter for DemoAdapter {
                 ),
             ],
         };
+        let session = Session::account(&["demo", &format!("{:?}", self.provider)], "demo");
         Outcome {
+            session,
+            account: Some("Conta de exemplo".into()),
             result: Some(Ok(Fetched {
+                identity: session.identity(),
                 account: Some("Conta de exemplo".into()),
                 plan: None,
                 origin: Origin::Fixture,

@@ -10,7 +10,10 @@ mod http;
 mod local;
 mod model;
 mod scheduler;
+mod session;
+mod time;
 
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -19,6 +22,8 @@ use chrono::Utc;
 pub use adapter::UsageAdapter;
 pub use model::{Provider, Snapshot, Usage};
 
+use crate::sync::{lock, wait_timeout_while};
+use adapter::{FetchError, Outcome};
 use scheduler::{Policy, Tracker};
 
 type Notify = Box<dyn Fn() + Send + Sync>;
@@ -36,8 +41,11 @@ pub struct Service {
 
 impl Service {
     pub fn new(adapters: Vec<Box<dyn UsageAdapter>>) -> Self {
+        Self::with_policy(adapters, Policy::default())
+    }
+
+    fn with_policy(adapters: Vec<Box<dyn UsageAdapter>>, policy: Policy) -> Self {
         let now = Utc::now();
-        let policy = Policy::default();
         Self {
             slots: adapters
                 .into_iter()
@@ -85,7 +93,7 @@ impl Service {
         let now = Utc::now();
         self.slots
             .iter()
-            .map(|slot| slot.tracker.lock().unwrap().usage(now))
+            .map(|slot| lock(&slot.tracker).usage(now))
             .collect()
     }
 
@@ -106,43 +114,62 @@ impl Service {
     pub fn refresh(&self, provider: Option<Provider>) {
         for slot in &self.slots {
             if provider.is_none_or(|provider| provider == slot.adapter.provider()) {
-                *slot.manual.lock().unwrap() = true;
+                *lock(&slot.manual) = true;
                 slot.wake.notify_one();
             }
         }
     }
 }
 
+/// Runs `job`, turning a panic into `None`. Nothing inside a job may unwind
+/// past the worker loop: a panic there would end the worker for good.
+fn guarded<T>(job: impl FnOnce() -> T) -> Option<T> {
+    catch_unwind(AssertUnwindSafe(job)).ok()
+}
+
 fn worker(slot: &Slot, notify: &Notify) {
     loop {
         let manual = {
             let wait = {
-                let tracker = slot.tracker.lock().unwrap();
-                (tracker.next_due() - Utc::now())
+                let tracker = lock(&slot.tracker);
+                tracker
+                    .next_due()
+                    .signed_duration_since(Utc::now())
                     .to_std()
                     .unwrap_or(Duration::ZERO)
                     .clamp(Duration::from_millis(250), Duration::from_secs(300))
             };
-            let manual = slot.manual.lock().unwrap();
-            let (mut manual, _) = slot
-                .wake
-                .wait_timeout_while(manual, wait, |manual| !*manual)
-                .unwrap();
+            let manual = lock(&slot.manual);
+            let mut manual = wait_timeout_while(&slot.wake, manual, wait, |manual| !*manual);
             std::mem::take(&mut *manual)
         };
 
         let now = Utc::now();
         {
-            let mut tracker = slot.tracker.lock().unwrap();
+            let mut tracker = lock(&slot.tracker);
             if !tracker.should_fetch(now, manual) {
                 continue;
             }
             tracker.begin(now);
         }
-        notify();
-        let outcome = slot.adapter.fetch(Utc::now());
-        slot.tracker.lock().unwrap().finish(outcome, Utc::now());
-        notify();
+        guarded(notify);
+        // A panicking adapter (for example on a response nobody anticipated)
+        // ends this attempt as malformed. The worker keeps running.
+        let outcome = guarded(|| slot.adapter.fetch(Utc::now())).unwrap_or_else(|| {
+            eprintln!(
+                "Aurora Control: the {:?} adapter panicked",
+                slot.adapter.provider()
+            );
+            Outcome::failed(FetchError::Malformed("adapter panicked".into()))
+        });
+        {
+            let mut tracker = lock(&slot.tracker);
+            let now = Utc::now();
+            if guarded(|| tracker.finish(outcome, now)).is_none() {
+                tracker.abort(now);
+            }
+        }
+        guarded(notify);
     }
 }
 
@@ -202,6 +229,71 @@ mod tests {
         assert_eq!(
             claude["activity"],
             json!({ "windowMinutes": 300, "tokens": 184250, "sessions": 2 })
+        );
+    }
+
+    /// Panics on the first attempt with an out-of-range value, then returns
+    /// the demo reading.
+    struct Flaky {
+        calls: Mutex<u32>,
+        inner: demo::DemoAdapter,
+    }
+
+    impl UsageAdapter for Flaky {
+        fn provider(&self) -> Provider {
+            Provider::Codex
+        }
+
+        fn fetch(&self, now: chrono::DateTime<Utc>) -> Outcome {
+            let call = {
+                let mut calls = lock(&self.calls);
+                *calls += 1;
+                *calls
+            };
+            if call == 1 {
+                // The baseline panicked here: TimeDelta::seconds out of range.
+                let _ = chrono::TimeDelta::seconds(i64::MAX);
+            }
+            self.inner.fetch(now)
+        }
+    }
+
+    #[test]
+    fn b02_a_panicking_attempt_neither_kills_the_worker_nor_poisons_the_cache() {
+        let service = Service::with_policy(
+            vec![Box::new(Flaky {
+                calls: Mutex::new(0),
+                inner: demo::DemoAdapter::new(Provider::Codex, 42),
+            })],
+            Policy {
+                manual_gap: Duration::ZERO,
+                ..Policy::default()
+            },
+        );
+        let (sender, receiver) = mpsc::channel();
+        let sender = Mutex::new(sender);
+        service.start(Box::new(move || {
+            let _ = lock(&sender).send(());
+        }));
+        // Start and end of the aborted attempt.
+        for _ in 0..2 {
+            receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        let usage = &service.snapshot()[0];
+        assert!(!usage.refreshing, "refreshing must end");
+        assert_eq!(usage.issue, Some(model::Issue::Malformed));
+        assert!(usage.checked_at.is_some());
+
+        // The same worker serves the next request.
+        service.refresh(None);
+        for _ in 0..2 {
+            receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        let usage = &service.snapshot()[0];
+        assert_eq!(usage.issue, None);
+        assert_eq!(
+            usage.reading,
+            model::Reading::Available { percent_used: 42 }
         );
     }
 

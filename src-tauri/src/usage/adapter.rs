@@ -6,10 +6,15 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 
 use super::model::{ConsumptionWindow, LocalActivity, Origin, Provider, Quota, Source};
+use super::session::{Fingerprint, Session};
 
 /// A normalized reading, before the scheduler decides its freshness.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Fetched {
+    /// The account these quotas belong to. `None` when no verifiable link to
+    /// an account exists, for example a local session log.
+    pub identity: Option<Fingerprint>,
+    /// Display label. Never used to decide which account the data belongs to.
     pub account: Option<String>,
     pub plan: Option<String>,
     pub origin: Origin,
@@ -35,11 +40,14 @@ pub enum FetchError {
 /// Everything an adapter learned during one attempt.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Outcome {
+    /// The session found in the local sign-in files during this attempt.
+    pub session: Session,
     pub result: Option<Result<Fetched, FetchError>>,
     /// Cached data the provider's own client stored locally. Used when the
-    /// live query fails.
+    /// live query fails. Never attributed to the current account.
     pub fallback: Option<Fetched>,
-    /// Account and plan labels known even without a quota reading.
+    /// Labels of the current session, known even without a quota reading.
+    /// Display only.
     pub account: Option<String>,
     pub plan: Option<String>,
     pub activity: Option<LocalActivity>,
@@ -50,6 +58,14 @@ impl Outcome {
         Self {
             result: Some(Err(error)),
             ..Self::default()
+        }
+    }
+
+    /// No usable sign-in: the cached quotas of the previous session are void.
+    pub fn signed_out(error: FetchError) -> Self {
+        Self {
+            session: Session::SignedOut,
+            ..Self::failed(error)
         }
     }
 }

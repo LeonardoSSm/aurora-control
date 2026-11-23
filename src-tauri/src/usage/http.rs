@@ -89,6 +89,10 @@ impl Transport for Ureq {
 
 /// `Retry-After` accepts delta-seconds or an HTTP date (RFC 9110 §10.2.3).
 pub fn parse_retry_after(value: &str, now: DateTime<Utc>) -> Option<Duration> {
+    raw_retry_after(value, now).map(super::time::bounded)
+}
+
+fn raw_retry_after(value: &str, now: DateTime<Utc>) -> Option<Duration> {
     let value = value.trim();
     if let Ok(seconds) = value.parse::<u64>() {
         return Some(Duration::from_secs(seconds));
