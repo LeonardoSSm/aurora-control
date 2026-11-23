@@ -1,0 +1,6 @@
+{
+  "identifier": "rail",
+  "description": "A barra lê a utilização e informa qual indicador está sob o ponteiro.",
+  "windows": ["rail"],
+  "permissions": ["allow-get-usage", "allow-set-hover"]
+}

@@ -1,0 +1,10 @@
+{
+  "identifier": "summary",
+  "description": "O resumo recebe a seleção e confirma a renderização ao backend.",
+  "windows": ["summary"],
+  "permissions": [
+    "core:event:allow-listen",
+    "allow-summary-ready",
+    "allow-show-summary"
+  ]
+}
