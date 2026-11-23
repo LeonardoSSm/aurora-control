@@ -2,42 +2,55 @@ import { useEffect, useRef, useState } from "react";
 import type { Provider } from "../usage/model";
 import {
   getRailPlacement,
+  onRailActive,
   onRailPlacement,
-  setHover,
-  setRailExpansion,
+  railPointer,
+  setRailMotion,
 } from "./commands";
-import type { RailPlacement } from "./commands";
-import { collapsedWidth, collapsedWidths, expandedWidth } from "./railGeometry";
-import type { RailWidths } from "./railGeometry";
+import type { RailActive, RailPlacement } from "./commands";
+import { collapsedShifts, slide } from "./railGeometry";
+import type { RailShifts } from "./railGeometry";
 
-const motionMs = 190;
+const openMs = 230;
+const closeMs = 190;
 
-function sameWidths(first: RailWidths, second: RailWidths) {
+function same(first: RailShifts, second: RailShifts) {
   return first[0] === second[0] && first[1] === second[1];
 }
 
+const easeOut = (t: number) => 1 - (1 - t) ** 3;
+const easeInOut = (t: number) =>
+  t < 0.5 ? 4 * t ** 3 : 1 - (-2 * t + 2) ** 3 / 2;
+
+/**
+ * Drives the slide of each indicator. Rust decides which indicator is active
+ * (`rail-active`); this hook animates toward it and only draws offsets that
+ * Windows accepted, so the input region tracks the shape on every frame.
+ */
 export function useRailMotion() {
   const [frame, setFrame] = useState<{
     placement: RailPlacement;
-    widths: RailWidths;
+    shifts: RailShifts;
+    active: Provider | null;
   } | null>(null);
-  const hoverHandler = useRef<((provider: Provider | null) => void) | null>(
+  const pointerHandler = useRef<((provider: Provider | null) => void) | null>(
     null,
   );
 
   useEffect(() => {
     let placement: RailPlacement | undefined;
-    let widths = collapsedWidths;
-    let target = collapsedWidths;
-    let hovered: Provider | null = null;
-    let transition: { from: RailWidths; start: number } | undefined;
+    let active: Provider | null = null;
+    let shifts = collapsedShifts;
+    let target = collapsedShifts;
+    let transition: { from: RailShifts; start: number } | undefined;
     let request = 0;
     let pending = false;
     let disposed = false;
+    let reported: Provider | null = null;
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
     function schedule() {
-      if (!disposed && !request && !pending && !sameWidths(widths, target)) {
+      if (!disposed && !request && !pending && !same(shifts, target)) {
         request = requestAnimationFrame(tick);
       }
     }
@@ -45,38 +58,38 @@ export function useRailMotion() {
     function tick(now: number) {
       request = 0;
       const view = placement;
-      if (!view || sameWidths(widths, target)) return;
-      transition ??= { from: widths, start: now };
-      const elapsed = Math.min(1, (now - transition.start) / motionMs);
-      const easing = reducedMotion.matches ? 1 : 1 - (1 - elapsed) ** 3;
-      const next: RailWidths = [
-        Math.round(
-          transition.from[0] + (target[0] - transition.from[0]) * easing,
-        ),
-        Math.round(
-          transition.from[1] + (target[1] - transition.from[1]) * easing,
-        ),
+      if (!view || same(shifts, target)) return;
+      transition ??= { from: shifts, start: now };
+      const opening = target.some((value) => value > 0);
+      const duration = opening ? openMs : closeMs;
+      const elapsed = Math.min(1, (now - transition.start) / duration);
+      const eased = reducedMotion.matches
+        ? 1
+        : (opening ? easeOut : easeInOut)(elapsed);
+      const from = transition.from;
+      const next: RailShifts = [
+        Math.round(from[0] + (target[0] - from[0]) * eased),
+        Math.round(from[1] + (target[1] - from[1]) * eased),
       ];
-      if (sameWidths(widths, next)) {
+      if (same(shifts, next)) {
         schedule();
         return;
       }
 
-      // Keep at most one native update in flight. Only draw widths that Windows
-      // accepted, so the pointer region tracks the shape through the animation.
+      // At most one native update in flight. Only draw accepted offsets.
       pending = true;
-      void setRailExpansion(view.generation, next)
+      void setRailMotion(view.generation, next)
         .then((accepted) => {
           if (disposed || placement !== view) return;
           if (accepted) {
-            widths = next;
-            setFrame({ placement: view, widths });
+            shifts = next;
+            setFrame({ placement: view, shifts, active });
           } else {
-            target = widths;
+            target = shifts;
           }
         })
         .catch((error: unknown) => {
-          if (placement === view) target = widths;
+          if (placement === view) target = shifts;
           console.error(error);
         })
         .finally(() => {
@@ -90,40 +103,57 @@ export function useRailMotion() {
         return;
       }
       placement = next;
-      hovered = null;
+      active = reported = null;
       transition = undefined;
-      widths = target = collapsedWidths;
-      setFrame({ placement: next, widths });
+      shifts = target = collapsedShifts;
+      setFrame({ placement: next, shifts, active });
     }
 
-    hoverHandler.current = (provider) => {
-      if (!placement || hovered === provider) return;
-      hovered = provider;
+    function acceptActive(next: RailActive) {
+      if (disposed || !placement || next.generation !== placement.generation) {
+        return;
+      }
+      active = next.provider;
+      // A closed panel may follow a lost pointer-leave: report again on the
+      // next movement so hovering the same indicator reopens it.
+      if (!active) reported = null;
       target = [
-        provider === "codex" ? expandedWidth : collapsedWidth,
-        provider === "claudeCode" ? expandedWidth : collapsedWidth,
+        active === "codex" ? slide : 0,
+        active === "claudeCode" ? slide : 0,
       ];
       transition = undefined;
+      setFrame({ placement, shifts, active });
       schedule();
-      void setHover(placement.generation, provider).catch(console.error);
+    }
+
+    pointerHandler.current = (provider) => {
+      if (!placement || reported === provider) return;
+      reported = provider;
+      void railPointer(placement.generation, provider).catch(console.error);
     };
 
-    const listener = onRailPlacement(acceptPlacement);
-    void listener
+    const listeners = [
+      onRailPlacement(acceptPlacement),
+      onRailActive(acceptActive),
+    ];
+    void Promise.all(listeners)
       .then(() => getRailPlacement())
       .then(acceptPlacement)
       .catch(console.error);
 
     return () => {
       disposed = true;
-      hoverHandler.current = null;
+      pointerHandler.current = null;
       cancelAnimationFrame(request);
-      void listener.then((unlisten) => unlisten()).catch(console.error);
+      for (const listener of listeners) {
+        void listener.then((unlisten) => unlisten()).catch(console.error);
+      }
     };
   }, []);
 
   return {
     frame,
-    onHover: (provider: Provider | null) => hoverHandler.current?.(provider),
+    onPointer: (provider: Provider | null) =>
+      pointerHandler.current?.(provider),
   };
 }

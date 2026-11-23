@@ -1,11 +1,16 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { Provider, Snapshot, Usage } from "../usage/model";
-import type { RailWidths, Side } from "./railGeometry";
+import type { RailShifts, Side } from "./railGeometry";
 
 export interface RailPlacement {
   side: Side;
   generation: number;
+}
+
+export interface RailActive {
+  generation: number;
+  provider: Provider | null;
 }
 
 export interface SummarySelection {
@@ -15,28 +20,30 @@ export interface SummarySelection {
 }
 
 export const getUsage = () => invoke<Snapshot>("get_usage");
+export const refreshUsage = (provider: Provider | null) =>
+  invoke<void>("refresh_usage", { provider });
 export const getRailPlacement = () =>
   invoke<RailPlacement>("get_rail_placement");
-export const setHover = (generation: number, provider: Provider | null) =>
-  invoke<void>("set_hover", { generation, provider });
-export const setRailExpansion = (generation: number, widths: RailWidths) =>
-  invoke<boolean>("set_rail_expansion", { generation, widths });
+export const railPointer = (generation: number, provider: Provider | null) =>
+  invoke<void>("rail_pointer", { generation, provider });
+export const setRailMotion = (generation: number, shifts: RailShifts) =>
+  invoke<boolean>("set_rail_motion", { generation, shifts });
 export const summaryReady = () => invoke<void>("summary_ready");
-export const showSummary = (revision: number) =>
-  invoke<void>("show_summary", { revision });
+export const showSummary = (revision: number, height: number) =>
+  invoke<void>("show_summary", { revision, height });
 
-export function onRailPlacement(handler: (payload: RailPlacement) => void) {
-  return getCurrentWebviewWindow().listen<RailPlacement>(
-    "rail-placement",
-    ({ payload }) => handler(payload),
+function listen<T>(event: string, handler: (payload: T) => void) {
+  return getCurrentWebviewWindow().listen<T>(event, ({ payload }) =>
+    handler(payload),
   );
 }
 
-export function onSummarySelection(
+export const onRailPlacement = (handler: (payload: RailPlacement) => void) =>
+  listen("rail-placement", handler);
+export const onRailActive = (handler: (payload: RailActive) => void) =>
+  listen("rail-active", handler);
+export const onUsageUpdated = (handler: (payload: Snapshot) => void) =>
+  listen("usage-updated", handler);
+export const onSummarySelection = (
   handler: (payload: SummarySelection) => void,
-) {
-  return getCurrentWebviewWindow().listen<SummarySelection>(
-    "summary-selection",
-    ({ payload }) => handler(payload),
-  );
-}
+) => listen("summary-selection", handler);

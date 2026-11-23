@@ -1,12 +1,13 @@
 {
   "identifier": "rail",
-  "description": "A barra lê a utilização e sincroniza a posição e o recorte dos indicadores.",
+  "description": "A barra lê a utilização, pede atualização manual e sincroniza o hover, a posição e o recorte dos indicadores.",
   "windows": ["rail"],
   "permissions": [
     "allow-get-usage",
+    "allow-refresh-usage",
     "allow-get-rail-placement",
-    "allow-set-hover",
-    "allow-set-rail-expansion",
+    "allow-rail-pointer",
+    "allow-set-rail-motion",
     "core:event:allow-listen",
     "core:event:allow-unlisten"
   ]
