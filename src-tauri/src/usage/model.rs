@@ -61,6 +61,35 @@ pub struct Quota {
     pub duration_minutes: Option<u32>,
     /// RFC 3339 with a UTC offset when the renewal time is known.
     pub resets_at: Option<String>,
+    /// The window renewed after the last measurement. `percent_used` is not a
+    /// reading: the consumption since the renewal is unknown until the next one.
+    pub renewed: bool,
+    /// May become the primary metric. Only windows whose semantics are known
+    /// qualify; future or secondary metrics are listed but never drawn.
+    #[serde(skip)]
+    pub eligible: bool,
+}
+
+impl Quota {
+    /// A primary-eligible rolling window.
+    pub fn window(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        percent_used: u8,
+        duration_minutes: Option<u32>,
+        resets_at: Option<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            kind: QuotaKind::Window,
+            percent_used,
+            duration_minutes,
+            resets_at,
+            renewed: false,
+            eligible: true,
+        }
+    }
 }
 
 /// The quota drawn by the ring. Explicitly identified by `id` and `label`.
@@ -72,6 +101,8 @@ pub struct ConsumptionWindow {
     pub duration_minutes: Option<u32>,
     /// RFC 3339 with a UTC offset when the renewal time is known.
     pub resets_at: Option<String>,
+    /// Renewed without a new measurement: the percentage is not a reading.
+    pub renewed: bool,
 }
 
 /// Token activity of local sessions. Not an account quota.
@@ -81,6 +112,9 @@ pub struct LocalActivity {
     pub window_minutes: u32,
     pub tokens: u64,
     pub sessions: u32,
+    /// A read limit (files, bytes, time or records) was reached: the totals
+    /// cover only part of the transcripts.
+    pub partial: bool,
 }
 
 /// Why the latest attempt did not produce a fresh reading.
@@ -97,6 +131,12 @@ pub enum Issue {
     AuthExpired,
     /// The provider rejected the credential (HTTP 401 or 403).
     AuthRejected,
+    /// A sign-in may exist, but its credential is not in a file this app
+    /// reads (system credential store, or a host app such as Claude Desktop).
+    CredentialsUnavailable,
+    /// The local credential file is unreadable, too large or not in the
+    /// expected format (for example while the provider is rewriting it).
+    CredentialsInvalid,
     /// The account type has no quota data source (for example an API key).
     Unsupported,
     /// HTTP 429. `retry_at` is the earliest next request.
@@ -107,8 +147,10 @@ pub enum Issue {
     Timeout,
     /// The response did not match the expected schema.
     Malformed,
+    /// Other HTTP failure. `retry_at` honors `Retry-After` (for example 503).
     Http {
         status: u16,
+        retry_at: Option<String>,
     },
 }
 
@@ -137,3 +179,13 @@ pub struct Usage {
 }
 
 pub type Snapshot = Vec<Usage>;
+
+/// A snapshot with its publication order. `sequence` grows with every
+/// publication, including the initial read, so the WebViews can drop events
+/// delivered out of order (audit I03).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageUpdate {
+    pub sequence: u64,
+    pub snapshot: Snapshot,
+}

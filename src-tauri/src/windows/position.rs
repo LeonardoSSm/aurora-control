@@ -86,36 +86,81 @@ impl Layout {
         })
     }
 
-    /// Screen area that keeps a hovered indicator open: the expanded circle,
-    /// the summary card and the gap between them.
-    pub fn hover_zone(&self, index: usize, summary: Option<Rect>) -> Zone {
-        let mut shifts = [0; 2];
-        shifts[index] = SLIDE;
+    /// The input shape of one indicator on screen, for the slide offsets of
+    /// the last frame Windows accepted: the same ellipse as the window region,
+    /// clipped to the rail window. Transparent corners are outside (audit I04).
+    pub fn indicator_shape(&self, index: usize, shifts: [u8; 2]) -> Shape {
         let circle = self.indicator_circles(shifts)[index];
-        let circle = Rect {
-            x: self.rail.x + circle.x,
-            y: self.rail.y + circle.y,
-            ..circle
-        };
-        let mut rects = vec![circle];
-        if let Some(summary) = summary.filter(|summary| summary.width > 0) {
-            // The bridge spans the gap at the height of the circle.
-            rects.push(Rect {
-                y: circle.y,
-                height: circle.height,
-                ..circle.union(&summary)
-            });
-            rects.push(summary);
+        Shape::Ellipse {
+            bounds: Rect {
+                x: self.rail.x + circle.x,
+                y: self.rail.y + circle.y,
+                ..circle
+            },
+            clip: self.rail,
         }
-        Zone(rects)
+    }
+
+    /// Screen area that keeps a hovered indicator open: the indicator as
+    /// drawn in the accepted frame, the summary card and the bridge between
+    /// them at the height of the circle.
+    pub fn hover_zone(&self, index: usize, shifts: [u8; 2], summary: Option<Rect>) -> Zone {
+        let circle = self.indicator_shape(index, shifts);
+        let mut shapes = vec![circle];
+        if let (Some(summary), Shape::Ellipse { bounds, .. }) =
+            (summary.filter(|summary| summary.width > 0), circle)
+        {
+            // The bridge spans from the circle center to the card.
+            let center = Rect {
+                x: bounds.x + bounds.width / 2,
+                width: 1,
+                ..bounds
+            };
+            shapes.push(Shape::Rect(Rect {
+                y: bounds.y,
+                height: bounds.height,
+                ..center.union(&summary)
+            }));
+            shapes.push(Shape::Rect(summary));
+        }
+        Zone(shapes)
     }
 }
 
-pub struct Zone(Vec<Rect>);
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Shape {
+    Rect(Rect),
+    /// The ellipse inscribed in `bounds`, intersected with `clip`.
+    Ellipse {
+        bounds: Rect,
+        clip: Rect,
+    },
+}
+
+impl Shape {
+    pub fn contains(&self, x: i32, y: i32) -> bool {
+        match *self {
+            Shape::Rect(rect) => rect.contains(x, y),
+            Shape::Ellipse { bounds, clip } => {
+                if !clip.contains(x, y) || !bounds.contains(x, y) {
+                    return false;
+                }
+                // Pixel centers against the normalized ellipse equation.
+                let rx = f64::from(bounds.width) / 2.0;
+                let ry = f64::from(bounds.height) / 2.0;
+                let dx = (f64::from(x - bounds.x) + 0.5 - rx) / rx;
+                let dy = (f64::from(y - bounds.y) + 0.5 - ry) / ry;
+                dx * dx + dy * dy <= 1.0
+            }
+        }
+    }
+}
+
+pub struct Zone(Vec<Shape>);
 
 impl Zone {
     pub fn contains(&self, x: i32, y: i32) -> bool {
-        self.0.iter().any(|rect| rect.contains(x, y))
+        self.0.iter().any(|shape| shape.contains(x, y))
     }
 }
 
@@ -326,7 +371,8 @@ mod tests {
     #[test]
     fn hover_zone_bridges_the_circle_and_the_summary() {
         let result = layout(WORK, 1.0, Side::Right, anchor(0), 180);
-        let zone = result.hover_zone(0, Some(result.summary));
+        let expanded = [SLIDE, 0];
+        let zone = result.hover_zone(0, expanded, Some(result.summary));
         // Gap between the summary's right edge and the expanded circle.
         assert!(zone.contains(1855, result.rail.y + 26));
         assert!(zone.contains(1600, 400));
@@ -334,8 +380,50 @@ mod tests {
         assert!(!zone.contains(1855, 380));
         // The neighbor indicator is not part of the zone.
         assert!(!zone.contains(1900, result.rail.y + INDICATOR_STEP + 26));
-        let alone = result.hover_zone(1, None);
+        let alone = result.hover_zone(1, [0, 0], None);
         assert!(alone.contains(1900, result.rail.y + INDICATOR_STEP + 26));
         assert!(!alone.contains(1900, result.rail.y + 26));
+    }
+
+    #[test]
+    fn i04_transparent_corners_and_the_unreached_final_frame_are_outside() {
+        for scale in [1.0, 1.25, 1.5] {
+            for side in [Side::Right, Side::Left] {
+                let result = layout(WORK, scale, side, anchor(0), 180);
+                let rail = result.rail;
+                // Expanded circle: its bounding box corner is not the circle.
+                let shape = result.indicator_shape(0, [SLIDE, 0]);
+                let Shape::Ellipse { bounds, .. } = shape else {
+                    unreachable!()
+                };
+                let center = (bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+                assert!(shape.contains(center.0, center.1), "{scale} {side:?}");
+                assert!(!shape.contains(bounds.x, bounds.y), "{scale} {side:?}");
+                assert!(
+                    !shape.contains(bounds.x + bounds.width - 1, bounds.y + bounds.height - 1),
+                    "{scale} {side:?}"
+                );
+                // Mid-animation (or collapsed), the zone follows the accepted
+                // frame, not the final expanded position.
+                let collapsed = result.hover_zone(0, [0, 0], None);
+                let expanded_center = center;
+                assert!(
+                    !collapsed.contains(expanded_center.0, expanded_center.1),
+                    "{scale} {side:?}"
+                );
+                // The collapsed half circle is clipped by the window.
+                let edge_y = rail.y + pixels(INDICATOR_RADIUS, scale);
+                let outside_x = match side {
+                    Side::Right => rail.x + rail.width,
+                    Side::Left => rail.x - 1,
+                };
+                assert!(!collapsed.contains(outside_x, edge_y), "{scale} {side:?}");
+                let inside_x = match side {
+                    Side::Right => rail.x + rail.width - 2,
+                    Side::Left => rail.x + 1,
+                };
+                assert!(collapsed.contains(inside_x, edge_y), "{scale} {side:?}");
+            }
+        }
     }
 }

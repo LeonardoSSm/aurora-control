@@ -2,6 +2,7 @@ import type { Side } from "../desktop/railGeometry";
 import { providerNames } from "../usage/model";
 import type { Quota, Usage } from "../usage/model";
 import {
+  awaitingReading,
   clampPercent,
   connection,
   connectionText,
@@ -9,6 +10,7 @@ import {
   formatReset,
   formatSpan,
   formatTokens,
+  hasRenewed,
   issueText,
   meter,
 } from "../usage/presentation";
@@ -22,20 +24,30 @@ function Bar({ percent, tone }: { percent: number; tone: string }) {
 }
 
 function QuotaRow({ quota, now }: { quota: Quota; now: Date }) {
-  const percent = clampPercent(quota.percentUsed);
+  // A renewed window has no measurement since the renewal (audit I02).
+  const renewed =
+    quota.kind === "window" &&
+    (quota.renewed || hasRenewed(quota.resetsAt, now));
+  const percent = renewed ? 0 : clampPercent(quota.percentUsed);
   const reset =
     quota.kind === "credits"
       ? "Créditos adicionais"
-      : formatReset(quota.resetsAt, now);
+      : renewed
+        ? awaitingReading
+        : formatReset(quota.resetsAt, now);
   return (
-    <li className="quota">
+    <li className="quota" data-renewed={renewed || undefined}>
       <div className="quota-head">
         <span className="quota-label">{quota.label}</span>
-        <span className="quota-value tabular-nums">{percent}%</span>
+        <span className="quota-value tabular-nums">
+          {renewed ? "—" : `${percent}%`}
+        </span>
       </div>
       <Bar
         percent={percent}
-        tone={percent >= criticalPercent ? "critical" : "normal"}
+        tone={
+          renewed ? "stale" : percent >= criticalPercent ? "critical" : "normal"
+        }
       />
       <span className="quota-reset">{reset}</span>
     </li>
@@ -51,7 +63,7 @@ export function UsageSummary({
   side: Side;
   now: Date;
 }) {
-  const reading = meter(usage);
+  const reading = meter(usage, now);
   const state = connection(usage);
   const hasReading = usage.status !== "unavailable";
 
@@ -89,7 +101,9 @@ export function UsageSummary({
         <Bar percent={reading.percent} tone={reading.tone} />
         {usage.window && (
           <p className="primary-reset">
-            {formatReset(usage.window.resetsAt, now)}
+            {usage.window.renewed
+              ? awaitingReading
+              : formatReset(usage.window.resetsAt, now)}
           </p>
         )}
       </section>
@@ -112,6 +126,7 @@ export function UsageSummary({
             {usage.activity.sessions === 1
               ? "1 sessão"
               : `${usage.activity.sessions} sessões`}
+            {usage.activity.partial && " · parcial"}
           </span>
         </p>
       )}

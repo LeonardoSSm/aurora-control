@@ -4,6 +4,7 @@ import {
   getRailPlacement,
   onRailActive,
   onRailPlacement,
+  onRailPointerReset,
   railPointer,
   setRailMotion,
 } from "./commands";
@@ -134,6 +135,11 @@ export function useRailMotion() {
 
     const listeners = [
       onRailPlacement(acceptPlacement),
+      // Rust found the cursor elsewhere when the intent elapsed (a lost
+      // pointerleave): the next movement over an indicator reports again.
+      onRailPointerReset((generation) => {
+        if (placement?.generation === generation) reported = null;
+      }),
       onRailActive(acceptActive),
     ];
     void Promise.all(listeners)

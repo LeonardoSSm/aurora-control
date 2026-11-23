@@ -2,7 +2,9 @@ import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Rail } from "./components/Rail";
 import { getUsage, onUsageUpdated, refreshUsage } from "./desktop/commands";
+import { isNewerUpdate } from "./desktop/ordering";
 import { useRailMotion } from "./desktop/useRailMotion";
+import type { UsageUpdate } from "./usage/model";
 import type { RailState } from "./usage/presentation";
 import "./styles.css";
 
@@ -12,21 +14,21 @@ function App() {
 
   useEffect(() => {
     let disposed = false;
-    // Data updates only replace the snapshot; geometry and motion are untouched.
-    const listener = onUsageUpdated((snapshot) => {
-      if (!disposed) setState({ status: "ready", snapshot });
-    });
+    let shown: number | null = null;
+    // Updates and the initial read are numbered by Rust: an older one that
+    // arrives late never replaces a newer snapshot.
+    const accept = (update: UsageUpdate) => {
+      if (disposed || !isNewerUpdate(shown, update.sequence)) return;
+      shown = update.sequence;
+      setState({ status: "ready", snapshot: update.snapshot });
+    };
+    const listener = onUsageUpdated(accept);
     void listener
       .then(() => getUsage())
-      .then(
-        (snapshot) => {
-          if (!disposed) setState({ status: "ready", snapshot });
-        },
-        (error: unknown) => {
-          console.error(error);
-          if (!disposed) setState({ status: "error" });
-        },
-      );
+      .then(accept, (error: unknown) => {
+        console.error(error);
+        if (!disposed && shown === null) setState({ status: "error" });
+      });
     return () => {
       disposed = true;
       void listener.then((unlisten) => unlisten()).catch(console.error);

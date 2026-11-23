@@ -26,13 +26,26 @@ export function clampPercent(value: number) {
   return Math.round(Math.min(100, Math.max(0, value)));
 }
 
-export function meter(usage?: Usage) {
+export function meter(usage?: Usage, now?: Date) {
   if (!usage || usage.status === "unavailable") {
     return {
       percent: 0,
       text: "—",
       label: "Utilização indisponível",
       tone: "none" as Tone,
+    };
+  }
+  // A window that renewed after the last measurement has no reading yet: it
+  // is never drawn as a fresh 0% (audit I02).
+  if (
+    usage.window &&
+    (usage.window.renewed || (now && hasRenewed(usage.window.resetsAt, now)))
+  ) {
+    return {
+      percent: 0,
+      text: "—",
+      label: `${usage.window.label}: janela renovada, aguardando nova leitura`,
+      tone: "stale" as Tone,
     };
   }
   const percent = clampPercent(usage.percentUsed);
@@ -115,11 +128,19 @@ export function formatSpan(milliseconds: number) {
   return rest ? `${days} d ${rest} h` : `${days} d`;
 }
 
+/** A renewal time that has passed: the window restarted without a reading. */
+export function hasRenewed(value: string | null | undefined, now: Date) {
+  const date = parse(value);
+  return date !== null && date.valueOf() <= now.valueOf();
+}
+
+export const awaitingReading = "Renovada · aguardando nova leitura";
+
 export function formatReset(value: string | null | undefined, now: Date) {
   const date = parse(value);
   if (!date) return "Renovação desconhecida";
   const remaining = date.valueOf() - now.valueOf();
-  if (remaining <= 0) return "Renovada";
+  if (remaining <= 0) return awaitingReading;
   return `Renova em ${formatSpan(remaining)} · ${formatMoment(value, now)}`;
 }
 
@@ -158,6 +179,12 @@ export function issueText(issue: Issue, provider: Provider, now: Date) {
         : "A sessão do Claude Code expirou. Execute “claude” no terminal para renová-la.";
     case "authRejected":
       return `O ${name} recusou a sessão local. Entre novamente.`;
+    case "credentialsUnavailable":
+      return provider === "codex"
+        ? "As credenciais do Codex estão no armazenamento do sistema, que o Aurora Control não lê."
+        : "Credencial do Claude Code indisponível no arquivo local. O login pode estar no app Claude Desktop; execute “claude” no terminal para usar a sessão do CLI.";
+    case "credentialsInvalid":
+      return `O arquivo de credenciais do ${name} não pôde ser lido. Ele pode estar sendo regravado; uma nova verificação ocorrerá em breve.`;
     case "unsupported":
       return provider === "codex"
         ? "Login por chave de API: o Codex não expõe cotas de assinatura."
@@ -173,7 +200,9 @@ export function issueText(issue: Issue, provider: Provider, now: Date) {
     case "malformed":
       return "Resposta inesperada do provedor. O formato pode ter mudado.";
     case "http":
-      return `O provedor respondeu com erro ${issue.status}.`;
+      return issue.retryAt
+        ? `O provedor respondeu com erro ${issue.status}. Nova tentativa ${formatMoment(issue.retryAt, now)}.`
+        : `O provedor respondeu com erro ${issue.status}.`;
   }
 }
 

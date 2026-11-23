@@ -5,7 +5,7 @@
 use chrono::{DateTime, TimeDelta, Utc};
 
 use super::adapter::{Fetched, Outcome, UsageAdapter, rfc3339};
-use super::model::{LocalActivity, Origin, Provider, Quota, QuotaKind, Source};
+use super::model::{LocalActivity, Origin, Provider, Quota, Source};
 use super::session::Session;
 
 pub struct DemoAdapter {
@@ -48,14 +48,13 @@ fn window(
     minutes: u32,
     resets_at: DateTime<Utc>,
 ) -> Quota {
-    Quota {
-        id: id.into(),
-        label: label.into(),
-        kind: QuotaKind::Window,
+    Quota::window(
+        id,
+        label,
         percent_used,
-        duration_minutes: Some(minutes),
-        resets_at: Some(rfc3339(resets_at)),
-    }
+        Some(minutes),
+        Some(rfc3339(resets_at)),
+    )
 }
 
 impl UsageAdapter for DemoAdapter {
@@ -127,6 +126,7 @@ impl UsageAdapter for DemoAdapter {
                 window_minutes: 300,
                 tokens: 184_250,
                 sessions: 2,
+                partial: false,
             }),
             ..Outcome::default()
         }

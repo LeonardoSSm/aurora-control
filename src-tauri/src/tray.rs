@@ -26,9 +26,9 @@ pub fn setup(app: &App, demo: bool) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "refresh" => app.state::<Service>().refresh(None),
-            "toggle" => windows::report(windows::toggle(app)),
-            "left" => windows::report(windows::set_side(app, Side::Left)),
-            "right" => windows::report(windows::set_side(app, Side::Right)),
+            "toggle" => windows::toggle(app),
+            "left" => windows::set_side(app, Side::Left),
+            "right" => windows::set_side(app, Side::Right),
             "quit" => app.exit(0),
             _ => {}
         })
@@ -41,7 +41,7 @@ pub fn setup(app: &App, demo: bool) -> tauri::Result<()> {
                     ..
                 }
             ) {
-                windows::report(windows::toggle(tray.app_handle()));
+                windows::toggle(tray.app_handle());
             }
         });
     if let Some(icon) = app.default_window_icon() {

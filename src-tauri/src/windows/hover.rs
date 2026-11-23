@@ -23,7 +23,7 @@ pub const CLOSE_GRACE: Duration = Duration::from_millis(240);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct Selection {
     pub provider: Provider,
-    pub revision: u32,
+    pub revision: u64,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -40,7 +40,7 @@ pub(super) struct Hover {
     epoch: u32,
     outside_since: Option<Instant>,
     ready: bool,
-    revision: u32,
+    revision: u64,
     selected: Option<Selection>,
 }
 
@@ -63,13 +63,21 @@ impl Hover {
     }
 
     /// Fires when the intent delay elapses: the pointer stayed on an indicator
-    /// that is not the active one.
+    /// that is not the active one. The caller still confirms the physical
+    /// cursor position before opening (audit I04).
     pub fn intent_elapsed(&self, epoch: u32) -> Option<Provider> {
         if epoch != self.epoch {
             return None;
         }
         self.pointer
             .filter(|provider| Some(*provider) != self.active)
+    }
+
+    /// The stored pointer turned out to be stale (a `pointerleave` was lost):
+    /// forget it, and invalidate pending intents.
+    pub fn forget_pointer(&mut self) {
+        self.pointer = None;
+        self.epoch = self.epoch.wrapping_add(1);
     }
 
     /// Marks `provider` as active and returns the summary selection to publish.
@@ -93,7 +101,7 @@ impl Hover {
     }
 
     fn select(&mut self, provider: Option<Provider>) -> Option<Selection> {
-        self.revision = self.revision.wrapping_add(1);
+        self.revision = self.revision.saturating_add(1);
         self.selected = provider.map(|provider| Selection {
             provider,
             revision: self.revision,
@@ -112,7 +120,7 @@ impl Hover {
         self.selected.filter(|_| self.ready)
     }
 
-    pub fn confirm(&self, revision: u32) -> Option<Provider> {
+    pub fn confirm(&self, revision: u64) -> Option<Provider> {
         self.selected
             .filter(|selection| self.ready && selection.revision == revision)
             .map(|selection| selection.provider)
@@ -201,5 +209,29 @@ mod tests {
         assert_eq!(hover.confirm(second.revision), None);
         assert_eq!(hover.current(), None);
         assert_eq!(hover.active(), None);
+    }
+}
+
+#[cfg(test)]
+mod lost_leave_tests {
+    use super::*;
+
+    #[test]
+    fn i04_a_stale_pointer_is_forgotten_instead_of_opening() {
+        let mut hover = Hover::default();
+        let Action::OpenAfter(epoch, _) = hover.pointer(Some(Provider::Codex)) else {
+            panic!("expected an intent delay");
+        };
+        // No pointerleave arrived. The state machine alone would open:
+        assert_eq!(hover.intent_elapsed(epoch), Some(Provider::Codex));
+        // The cursor check found the cursor elsewhere.
+        hover.forget_pointer();
+        assert_eq!(hover.intent_elapsed(epoch), None);
+        assert_eq!(hover.active(), None);
+        // Coming back to the indicator starts a new intent.
+        assert!(matches!(
+            hover.pointer(Some(Provider::Codex)),
+            Action::OpenAfter(_, OPEN_DELAY)
+        ));
     }
 }

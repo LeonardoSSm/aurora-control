@@ -21,10 +21,13 @@ use serde::de::IgnoredAny;
 use serde_json::Value;
 
 use super::adapter::{
-    FetchError, Fetched, Outcome, UsageAdapter, mask_account, percent, rfc3339, title_case,
+    FetchError, Fetched, Outcome, UsageAdapter, mask_account, percent, rfc3339, schema_anomaly,
+    title_case,
 };
 use super::http::{Transport, Ureq, check_status};
-use super::local::{env_dir, home_dir, jwt_claims, read_tail};
+use super::local::{
+    Budget, ReadError, env_dir, home_dir, jwt_claims, read_limited, read_tail_within,
+};
 use super::model::{Origin, Provider, Quota, QuotaKind};
 use super::session::Session;
 use super::time;
@@ -35,6 +38,12 @@ const AUTH_CLAIM: &str = "https://api.openai.com/auth";
 const EXPIRY_MARGIN: TimeDelta = TimeDelta::seconds(30);
 const ROLLOUT_TAIL: u64 = 512 * 1024;
 const ROLLOUT_FILES: usize = 6;
+/// Directory entries examined per folder of `sessions/`, and day folders visited.
+const SCAN_ENTRIES: usize = 2048;
+const SCAN_DAYS: usize = 10;
+const MAX_CREDENTIALS: u64 = 256 * 1024;
+const MAX_CONFIG: u64 = 256 * 1024;
+const MAX_ADDITIONAL: usize = 16;
 /// Older observations describe windows that have all renewed.
 const ROLLOUT_MAX_AGE: TimeDelta = TimeDelta::days(8);
 /// Tolerated clock skew for records stamped slightly in the future.
@@ -60,6 +69,9 @@ impl<T: Transport> Codex<T> {
 
 #[derive(Deserialize)]
 struct AuthFile {
+    /// Declared by recent Codex versions: `chatgpt` or `apikey`.
+    auth_mode: Option<String>,
+    /// Presence only. The value is never retained.
     #[serde(rename = "OPENAI_API_KEY")]
     api_key: Option<IgnoredAny>,
     tokens: Option<Tokens>,
@@ -90,20 +102,43 @@ fn unverified(error: FetchError) -> (FetchError, Session) {
     (error, Session::Unverified)
 }
 
+/// Codex can keep its credentials in the system credential store instead of
+/// `auth.json` (`cli_auth_credentials_store = "keyring"` or `"auto"` in
+/// `config.toml`). This app never reads that store, so a missing file is then
+/// no proof of a logout.
+fn uses_system_store(home: &Path) -> bool {
+    let Ok(config) = read_limited(&home.join("config.toml"), MAX_CONFIG) else {
+        return false;
+    };
+    config.lines().any(|line| {
+        let line = line.split('#').next().unwrap_or_default();
+        let Some((key, value)) = line.split_once('=') else {
+            return false;
+        };
+        key.trim() == "cli_auth_credentials_store"
+            && matches!(value.trim().trim_matches(['"', '\'']), "keyring" | "auto")
+    })
+}
+
 fn read_sign_in(home: &Path) -> Result<SignIn, (FetchError, Session)> {
-    let text = match fs::read_to_string(home.join("auth.json")) {
+    let text = match read_limited(&home.join("auth.json"), MAX_CREDENTIALS) {
         Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(signed_out(FetchError::AuthMissing));
+        Err(ReadError::Missing) if uses_system_store(home) => {
+            return Err(unverified(FetchError::CredentialsUnavailable));
         }
-        Err(_) => {
-            return Err(unverified(FetchError::Malformed(
-                "auth.json unreadable".into(),
-            )));
+        Err(ReadError::Missing) => return Err(signed_out(FetchError::AuthMissing)),
+        Err(ReadError::TooLarge | ReadError::Unreadable) => {
+            return Err(unverified(FetchError::CredentialsInvalid));
         }
     };
-    let file: AuthFile = serde_json::from_str(&text)
-        .map_err(|_| unverified(FetchError::Malformed("auth.json schema".into())))?;
+    let file: AuthFile =
+        serde_json::from_str(&text).map_err(|_| unverified(FetchError::CredentialsInvalid))?;
+    let mode = file.auth_mode.as_deref().map(str::to_ascii_lowercase);
+    // A declared API-key mode wins over leftover OAuth fields: an API key has
+    // no ChatGPT plan windows to report.
+    if matches!(mode.as_deref(), Some("apikey" | "api_key")) {
+        return Err(signed_out(FetchError::Unsupported));
+    }
     let tokens = file.tokens;
     let access_token = tokens
         .as_ref()
@@ -113,7 +148,6 @@ fn read_sign_in(home: &Path) -> Result<SignIn, (FetchError, Session)> {
         access_token.filter(|value| !value.is_empty()),
         account_id.filter(|value| !value.is_empty()),
     ) else {
-        // An API key has no ChatGPT plan windows to report.
         return Err(signed_out(if file.api_key.is_some() {
             FetchError::Unsupported
         } else {
@@ -140,8 +174,8 @@ fn read_sign_in(home: &Path) -> Result<SignIn, (FetchError, Session)> {
         .and_then(|claims| claims[AUTH_CLAIM]["chatgpt_plan_type"].as_str())
         .map(title_case);
     let expires_at = jwt_claims(&access_token)
-        .and_then(|claims| claims["exp"].as_i64())
-        .and_then(|exp| DateTime::from_timestamp(exp, 0));
+        .and_then(|claims| claims["exp"].as_f64())
+        .and_then(time::from_epoch);
     Ok(SignIn {
         access_token,
         account_id,
@@ -164,9 +198,25 @@ pub fn window_label(minutes: u32) -> String {
     }
 }
 
+/// A validated percentage of `value`, or `None` with an anomaly report.
+fn used_percent(value: &Value, key: &str, what: &str) -> Option<u8> {
+    let raw = value.get(key).filter(|raw| !raw.is_null())?;
+    let checked = raw.as_f64().and_then(percent);
+    if checked.is_none() {
+        schema_anomaly(Provider::Codex, &format!("{what}.{key} outside 0-100"));
+    }
+    checked
+}
+
 /// One `*_window` object of the usage endpoint.
-fn api_window(value: &Value, id: &str, prefix: Option<&str>, now: DateTime<Utc>) -> Option<Quota> {
-    let used = value.get("used_percent")?.as_f64()?;
+fn api_window(
+    value: &Value,
+    id: &str,
+    prefix: Option<&str>,
+    eligible: bool,
+    now: DateTime<Utc>,
+) -> Option<Quota> {
+    let used = used_percent(value, "used_percent", id)?;
     let minutes = value["limit_window_seconds"]
         .as_f64()
         .and_then(time::window_minutes);
@@ -183,12 +233,14 @@ fn api_window(value: &Value, id: &str, prefix: Option<&str>, now: DateTime<Utc>)
     );
     let base = minutes.map(window_label).unwrap_or_else(|| "Janela".into());
     Some(Quota {
-        id: id.into(),
-        label: prefix.map_or(base.clone(), |prefix| format!("{prefix} · {base}")),
-        kind: QuotaKind::Window,
-        percent_used: percent(used),
-        duration_minutes: minutes,
-        resets_at: resets_at.map(rfc3339),
+        eligible,
+        ..Quota::window(
+            id,
+            prefix.map_or(base.clone(), |prefix| format!("{prefix} · {base}")),
+            used,
+            minutes,
+            resets_at.map(rfc3339),
+        )
     })
 }
 
@@ -196,6 +248,7 @@ fn rate_limit_windows(
     limit: &Value,
     id: &str,
     prefix: Option<&str>,
+    eligible: bool,
     now: DateTime<Utc>,
     quotas: &mut Vec<Quota>,
 ) {
@@ -205,7 +258,8 @@ fn rate_limit_windows(
     ] {
         if let Some(quota) = limit
             .get(key)
-            .and_then(|window| api_window(window, &format!("{id}-{role}"), prefix, now))
+            .filter(|window| window.is_object())
+            .and_then(|window| api_window(window, &format!("{id}-{role}"), prefix, eligible, now))
         {
             quotas.push(quota);
         }
@@ -215,7 +269,10 @@ fn rate_limit_windows(
 /// Quotas, masked account label and plan.
 type ParsedUsage = (Vec<Quota>, Option<String>, Option<String>);
 
-/// Normalizes the internal `wham/usage` response.
+/// Normalizes the internal `wham/usage` response. Availability requires at
+/// least one valid window of the main `rate_limit`: code review, additional
+/// limits and spend controls are listed, but never drawn as the ring, and a
+/// response with only those is not a reading (audit I08).
 pub fn parse_usage(body: &str, now: DateTime<Utc>) -> Result<ParsedUsage, FetchError> {
     let value: Value =
         serde_json::from_str(body).map_err(|_| FetchError::Malformed("usage json".into()))?;
@@ -224,7 +281,10 @@ pub fn parse_usage(body: &str, now: DateTime<Utc>) -> Result<ParsedUsage, FetchE
     }
     let mut quotas = Vec::new();
     if let Some(limit) = value.get("rate_limit").filter(|limit| limit.is_object()) {
-        rate_limit_windows(limit, "codex", None, now, &mut quotas);
+        rate_limit_windows(limit, "codex", None, true, now, &mut quotas);
+    }
+    if !quotas.iter().any(|quota| quota.eligible) {
+        return Err(FetchError::Malformed("no main rate-limit window".into()));
     }
     if let Some(limit) = value
         .get("code_review_rate_limit")
@@ -234,22 +294,25 @@ pub fn parse_usage(body: &str, now: DateTime<Utc>) -> Result<ParsedUsage, FetchE
             limit,
             "codeReview",
             Some("Revisão de código"),
+            false,
             now,
             &mut quotas,
         );
     }
     if let Some(extra) = value["additional_rate_limits"].as_array() {
-        for (index, entry) in extra.iter().enumerate() {
+        for (index, entry) in extra.iter().enumerate().take(MAX_ADDITIONAL) {
             let name = entry["limit_name"]
                 .as_str()
                 .or_else(|| entry["metered_feature"].as_str())
                 .map(title_case)
+                .filter(|name| !name.is_empty())
                 .unwrap_or_else(|| format!("Limite adicional {}", index + 1));
-            if let Some(limit) = entry.get("rate_limit") {
+            if let Some(limit) = entry.get("rate_limit").filter(|limit| limit.is_object()) {
                 rate_limit_windows(
                     limit,
                     &format!("additional{index}"),
                     Some(&name),
+                    false,
                     now,
                     &mut quotas,
                 );
@@ -257,22 +320,19 @@ pub fn parse_usage(body: &str, now: DateTime<Utc>) -> Result<ParsedUsage, FetchE
         }
     }
     let spend = &value["spend_control"]["individual_limit"];
-    if let Some(used) = spend["used_percent"].as_f64() {
+    if let Some(used) = used_percent(spend, "used_percent", "spend_control") {
         quotas.push(Quota {
-            id: "spendLimit".into(),
-            label: "Limite de gastos".into(),
             kind: QuotaKind::Credits,
-            percent_used: percent(used),
-            duration_minutes: None,
-            resets_at: time::plausible_reset(
-                spend["reset_at"].as_f64().and_then(time::from_epoch),
-                now,
+            eligible: false,
+            ..Quota::window(
+                "spendLimit",
+                "Limite de gastos",
+                used,
+                None,
+                time::plausible_reset(spend["reset_at"].as_f64().and_then(time::from_epoch), now)
+                    .map(rfc3339),
             )
-            .map(rfc3339),
         });
-    }
-    if quotas.is_empty() {
-        return Err(FetchError::Malformed("no rate-limit windows".into()));
     }
     let plan = value["plan_type"].as_str().map(title_case);
     let account = value["email"].as_str().map(mask_account);
@@ -281,7 +341,7 @@ pub fn parse_usage(body: &str, now: DateTime<Utc>) -> Result<ParsedUsage, FetchE
 
 /// One `rate_limits` window as written by the Codex client to its rollout log.
 fn rollout_window(value: &Value, id: &str, observed: DateTime<Utc>) -> Option<Quota> {
-    let used = value.get("used_percent")?.as_f64()?;
+    let used = used_percent(value, "used_percent", "rollout")?;
     let minutes = value["window_minutes"]
         .as_u64()
         .and_then(|minutes| u32::try_from(minutes).ok())
@@ -297,14 +357,13 @@ fn rollout_window(value: &Value, id: &str, observed: DateTime<Utc>) -> Option<Qu
             }),
         observed,
     );
-    Some(Quota {
-        id: id.into(),
-        label: minutes.map(window_label).unwrap_or_else(|| "Janela".into()),
-        kind: QuotaKind::Window,
-        percent_used: percent(used),
-        duration_minutes: minutes,
-        resets_at: resets_at.map(rfc3339),
-    })
+    Some(Quota::window(
+        id,
+        minutes.map(window_label).unwrap_or_else(|| "Janela".into()),
+        used,
+        minutes,
+        resets_at.map(rfc3339),
+    ))
 }
 
 /// Parses the newest usable `rate_limits` record of a rollout log.
@@ -338,6 +397,7 @@ pub fn parse_rollout(text: &str, now: DateTime<Utc>) -> Option<Fetched> {
             .filter_map(|(id, key)| {
                 limits
                     .get(key)
+                    .filter(|window| window.is_object())
                     .and_then(|window| rollout_window(window, id, observed))
             })
             .collect();
@@ -354,14 +414,25 @@ pub fn parse_rollout(text: &str, now: DateTime<Utc>) -> Option<Fetched> {
 }
 
 /// Lists the newest rollout logs by walking `sessions/YYYY/MM/DD` backwards.
-fn newest_rollouts(home: &Path) -> Vec<PathBuf> {
-    fn sorted_dirs(path: &Path) -> Vec<PathBuf> {
-        let mut dirs: Vec<PathBuf> = fs::read_dir(path)
-            .into_iter()
+/// Only numeric folders are followed, each folder is scanned up to
+/// `SCAN_ENTRIES` entries, at most `SCAN_DAYS` day folders are opened, and the
+/// shared budget bounds the total work (audit I06).
+fn newest_rollouts(home: &Path, budget: &mut Budget) -> Vec<PathBuf> {
+    fn sorted_dirs(path: &Path, budget: &mut Budget) -> Vec<PathBuf> {
+        let Ok(entries) = fs::read_dir(path) else {
+            return Vec::new();
+        };
+        let mut dirs: Vec<PathBuf> = entries
+            .take(SCAN_ENTRIES)
+            .take_while(|_| budget.entry())
             .flatten()
-            .flatten()
+            .filter(|entry| {
+                entry.file_name().to_str().is_some_and(|name| {
+                    !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit())
+                })
+            })
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
             .map(|entry| entry.path())
-            .filter(|path| path.is_dir())
             .collect();
         dirs.sort();
         dirs.reverse();
@@ -369,12 +440,17 @@ fn newest_rollouts(home: &Path) -> Vec<PathBuf> {
     }
 
     let mut files = Vec::new();
-    'days: for year in sorted_dirs(&home.join("sessions")) {
-        for month in sorted_dirs(&year) {
-            for day in sorted_dirs(&month) {
-                let mut found: Vec<(std::time::SystemTime, PathBuf)> = fs::read_dir(&day)
-                    .into_iter()
-                    .flatten()
+    let mut days = 0;
+    'days: for year in sorted_dirs(&home.join("sessions"), budget) {
+        for month in sorted_dirs(&year, budget) {
+            for day in sorted_dirs(&month, budget) {
+                days += 1;
+                let Ok(entries) = fs::read_dir(&day) else {
+                    continue;
+                };
+                let mut found: Vec<(std::time::SystemTime, PathBuf)> = entries
+                    .take(SCAN_ENTRIES)
+                    .take_while(|_| budget.entry())
                     .flatten()
                     .filter(|entry| {
                         let name = entry.file_name();
@@ -387,7 +463,7 @@ fn newest_rollouts(home: &Path) -> Vec<PathBuf> {
                     .collect();
                 found.sort();
                 files.extend(found.into_iter().rev().map(|(_, path)| path));
-                if files.len() >= ROLLOUT_FILES {
+                if files.len() >= ROLLOUT_FILES || days >= SCAN_DAYS || budget.exhausted() {
                     break 'days;
                 }
             }
@@ -398,9 +474,10 @@ fn newest_rollouts(home: &Path) -> Vec<PathBuf> {
 }
 
 fn rollout_fallback(home: &Path, now: DateTime<Utc>) -> Option<Fetched> {
-    newest_rollouts(home)
+    let mut budget = Budget::rollouts();
+    newest_rollouts(home, &mut budget)
         .iter()
-        .filter_map(|path| read_tail(path, ROLLOUT_TAIL).ok())
+        .filter_map(|path| read_tail_within(path, ROLLOUT_TAIL, &mut budget).ok())
         .filter_map(|text| parse_rollout(&text, now))
         .max_by_key(|fetched| fetched.observed_at)
 }
@@ -408,6 +485,16 @@ fn rollout_fallback(home: &Path, now: DateTime<Utc>) -> Option<Fetched> {
 impl<T: Transport> UsageAdapter for Codex<T> {
     fn provider(&self) -> Provider {
         Provider::Codex
+    }
+
+    fn session(&self, _now: DateTime<Utc>) -> Option<Session> {
+        Some(match &self.home {
+            None => Session::SignedOut,
+            Some(home) => match read_sign_in(home) {
+                Ok(sign_in) => sign_in.session,
+                Err((_, session)) => session,
+            },
+        })
     }
 
     fn fetch(&self, now: DateTime<Utc>) -> Outcome {
@@ -677,10 +764,7 @@ mod tests {
         dir.write("auth.json", r#"{"tokens": {"access_token": "#);
         let partial = codex.fetch(now());
         assert_eq!(partial.session, Session::Unverified);
-        assert!(matches!(
-            partial.result,
-            Some(Err(FetchError::Malformed(_)))
-        ));
+        assert_eq!(partial.result, Some(Err(FetchError::CredentialsInvalid)));
         assert_eq!(codex.transport.request_count(), 0);
     }
 
@@ -764,6 +848,70 @@ mod tests {
             fetched.quotas[0].resets_at.as_deref(),
             Some("2026-11-23T17:01:00Z")
         );
+    }
+
+    #[test]
+    fn i08_credit_only_or_out_of_domain_responses_are_not_readings() {
+        for body in [
+            r#"{"spend_control":{"individual_limit":{"used_percent":40}}}"#,
+            r#"{"code_review_rate_limit":{"primary_window":{"used_percent":3}}}"#,
+            r#"{"rate_limit":{"primary_window":{"used_percent":180}}}"#,
+            r#"{"rate_limit":{"primary_window":{"used_percent":null}}}"#,
+        ] {
+            assert!(
+                matches!(parse_usage(body, now()), Err(FetchError::Malformed(_))),
+                "{body}"
+            );
+        }
+        // Secondary metrics are listed but never eligible for the ring.
+        let body = json!({
+            "rate_limit": { "primary_window": { "used_percent": 10, "limit_window_seconds": 18000 } },
+            "code_review_rate_limit": { "primary_window": { "used_percent": 99 } },
+            "additional_rate_limits": [{ "limit_name": "spark", "rate_limit": {
+                "primary_window": { "used_percent": 98 } } }]
+        });
+        let (quotas, _, _) = parse_usage(&body.to_string(), now()).unwrap();
+        let eligible: Vec<_> = quotas
+            .iter()
+            .filter(|quota| quota.eligible)
+            .map(|quota| quota.id.as_str())
+            .collect();
+        assert_eq!(eligible, ["codex-primary"]);
+        assert_eq!(quotas.len(), 3);
+    }
+
+    #[test]
+    fn i06_declared_mode_and_system_store_are_honored() {
+        let dir = TempDir::new("codex-mode");
+        let codex = Codex::new(Some(dir.path().into()), Script::new(vec![]));
+        // Leftover OAuth fields do not override a declared API-key mode.
+        signed_in(&dir, now().timestamp() + 3600);
+        let text = std::fs::read_to_string(dir.path().join("auth.json")).unwrap();
+        dir.write("auth.json", &text.replace("\"chatgpt\"", "\"apikey\""));
+        let outcome = codex.fetch(now());
+        assert_eq!(outcome.result, Some(Err(FetchError::Unsupported)));
+        assert_eq!(outcome.session, Session::SignedOut);
+        // Credentials kept in the system store: not a logout, not readable.
+        std::fs::remove_file(dir.path().join("auth.json")).unwrap();
+        dir.write(
+            "config.toml",
+            "model = \"x\"\ncli_auth_credentials_store = \"keyring\" # os\n",
+        );
+        let outcome = codex.fetch(now());
+        assert_eq!(
+            outcome.result,
+            Some(Err(FetchError::CredentialsUnavailable))
+        );
+        assert_eq!(outcome.session, Session::Unverified);
+        dir.write("config.toml", "cli_auth_credentials_store = \"file\"\n");
+        assert_eq!(codex.fetch(now()).session, Session::SignedOut);
+        // An oversized auth.json is never loaded.
+        dir.write("auth.json", &" ".repeat(300 * 1024));
+        assert_eq!(
+            codex.fetch(now()).result,
+            Some(Err(FetchError::CredentialsInvalid))
+        );
+        assert_eq!(codex.transport.request_count(), 0);
     }
 
     #[test]

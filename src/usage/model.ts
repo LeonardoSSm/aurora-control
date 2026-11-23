@@ -12,6 +12,8 @@ export interface Quota {
   durationMinutes: number | null;
   /** RFC 3339 with a UTC offset, when known. */
   resetsAt: string | null;
+  /** Renewed after the last measurement: `percentUsed` is not a reading. */
+  renewed: boolean;
 }
 
 /** The metric drawn by the ring, explicitly identified. */
@@ -21,6 +23,8 @@ export interface ConsumptionWindow {
   durationMinutes: number | null;
   /** RFC 3339 with a UTC offset, when known. */
   resetsAt: string | null;
+  /** Renewed after the last measurement: the percentage is not a reading. */
+  renewed: boolean;
 }
 
 /** Token activity of local sessions. Not an account quota. */
@@ -28,6 +32,8 @@ export interface LocalActivity {
   windowMinutes: number;
   tokens: number;
   sessions: number;
+  /** A read limit was reached: the totals cover only part of the logs. */
+  partial: boolean;
 }
 
 export type Issue =
@@ -36,13 +42,15 @@ export type Issue =
         | "authMissing"
         | "authExpired"
         | "authRejected"
+        | "credentialsUnavailable"
+        | "credentialsInvalid"
         | "unsupported"
         | "network"
         | "timeout"
         | "malformed";
     }
   | { code: "rateLimited"; retryAt: string | null }
-  | { code: "http"; status: number };
+  | { code: "http"; status: number; retryAt: string | null };
 
 type Reading =
   | { status: "available" | "stale"; percentUsed: number }
@@ -67,6 +75,12 @@ export type Usage = Reading & {
 };
 
 export type Snapshot = readonly Usage[];
+
+/** A snapshot with its publication order (strictly increasing). */
+export interface UsageUpdate {
+  sequence: number;
+  snapshot: Snapshot;
+}
 
 export const providers = ["codex", "claudeCode"] as const;
 

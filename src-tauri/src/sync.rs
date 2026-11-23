@@ -13,6 +13,18 @@ pub fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// `Condvar::wait_timeout` that recovers a poisoned guard.
+pub fn wait_timeout<'a, T>(
+    condvar: &Condvar,
+    guard: MutexGuard<'a, T>,
+    timeout: Duration,
+) -> MutexGuard<'a, T> {
+    match condvar.wait_timeout(guard, timeout) {
+        Ok((guard, _)) => guard,
+        Err(poisoned) => poisoned.into_inner().0,
+    }
+}
+
 /// `Condvar::wait_timeout_while` that recovers a poisoned guard.
 pub fn wait_timeout_while<'a, T>(
     condvar: &Condvar,

@@ -31,6 +31,7 @@ const sample: Usage = {
     label: "Semanal",
     durationMinutes: 10_080,
     resetsAt: "2026-11-26T08:29:17Z",
+    renewed: false,
   },
   quotas: [
     {
@@ -40,6 +41,7 @@ const sample: Usage = {
       percentUsed: 0,
       durationMinutes: 300,
       resetsAt: "2026-11-23T23:05:25Z",
+      renewed: false,
     },
   ],
   activity: null,
@@ -251,7 +253,12 @@ describe("summary", () => {
           quotas: [],
           updatedAt: null,
           issue: { code: "rateLimited", retryAt: "2026-11-23T18:10:00Z" },
-          activity: { windowMinutes: 300, tokens: 184_250, sessions: 2 },
+          activity: {
+            windowMinutes: 300,
+            tokens: 184_250,
+            sessions: 2,
+            partial: false,
+          },
         }}
       />,
     );
@@ -282,7 +289,9 @@ describe("time formatting", () => {
     expect(formatSpan(30_000)).toBe("menos de 1 min");
     expect(formatSpan(134 * 60_000)).toBe("2 h 14 min");
     expect(formatSpan(3 * 86_400_000)).toBe("3 d");
-    expect(formatReset("2026-11-23T17:00:00Z", now)).toBe("Renovada");
+    expect(formatReset("2026-11-23T17:00:00Z", now)).toBe(
+      "Renovada · aguardando nova leitura",
+    );
     expect(formatReset(null, now)).toBe("Renovação desconhecida");
   });
 });

@@ -16,7 +16,7 @@
 //!   in `projects/`, reported as `LocalActivity`, never as a quota;
 //! - API costs: an API-key login has no quota endpoint, so it is `Unsupported`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -26,10 +26,11 @@ use serde::de::IgnoredAny;
 use serde_json::Value;
 
 use super::adapter::{
-    FetchError, Fetched, Outcome, UsageAdapter, mask_account, percent, title_case,
+    FetchError, Fetched, Outcome, UsageAdapter, display_label, mask_account, percent,
+    schema_anomaly, title_case,
 };
 use super::http::{Transport, Ureq, check_status};
-use super::local::{env_dir, home_dir, read_tail};
+use super::local::{Budget, ReadError, env_dir, home_dir, read_limited, read_tail_within};
 use super::model::{LocalActivity, Origin, Provider, Quota, QuotaKind};
 use super::session::Session;
 use super::time;
@@ -39,6 +40,10 @@ const OAUTH_BETA: &str = "oauth-2025-04-20";
 const EXPIRY_MARGIN: TimeDelta = TimeDelta::seconds(30);
 const ACTIVITY_MINUTES: u32 = 300;
 const TRANSCRIPT_TAIL: u64 = 8 * 1024 * 1024;
+const MAX_CREDENTIALS: u64 = 256 * 1024;
+/// `.claude.json` also keeps per-project history; a few hundred KiB is typical.
+const MAX_PROFILE: u64 = 8 * 1024 * 1024;
+const MAX_USAGE_KEYS: usize = 64;
 
 pub struct ClaudeCode<T: Transport> {
     config: Option<PathBuf>,
@@ -116,7 +121,7 @@ struct Profile {
 
 fn read_profile(path: Option<&Path>) -> Profile {
     let file = path
-        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|path| read_limited(path, MAX_PROFILE).ok())
         .and_then(|text| serde_json::from_str::<ProfileFile>(&text).ok());
     let Some(file) = file else {
         return Profile {
@@ -148,7 +153,7 @@ fn read_profile(path: Option<&Path>) -> Profile {
         identity,
         account: email
             .map(|email| mask_account(&email))
-            .or(account.organization_name),
+            .or_else(|| account.organization_name.as_deref().and_then(display_label)),
         api_key,
     }
 }
@@ -184,34 +189,46 @@ impl NoSignIn {
     }
 }
 
-fn read_sign_in(config: &Path, api_key: bool, now: DateTime<Utc>) -> Result<SignIn, NoSignIn> {
+/// Reads `.credentials.json`.
+///
+/// - No file, or no `claudeAiOauth` token: the CLI has no session in this
+///   file. That proves a logout only when the profile has no account either;
+///   otherwise the session may live in Claude Desktop or another host that
+///   supplies credentials directly, so the credential is merely unavailable
+///   to this app (audit I06).
+/// - Unreadable, oversized or malformed file: invalid, proves nothing.
+/// - `scopes` present without `user:profile`: an inference-only token.
+///   `scopes` absent (older CLI versions): the request is attempted, and a
+///   401/403 answer is reported as a rejected session.
+fn read_sign_in(config: &Path, profile: &Profile, now: DateTime<Utc>) -> Result<SignIn, NoSignIn> {
     let absent = || {
-        NoSignIn::signed_out(if api_key {
-            FetchError::Unsupported
+        if profile.identity.is_some() {
+            NoSignIn::unverified(FetchError::CredentialsUnavailable, None)
         } else {
-            FetchError::AuthMissing
-        })
-    };
-    let text = match fs::read_to_string(config.join(".credentials.json")) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(absent()),
-        Err(_) => {
-            return Err(NoSignIn::unverified(
-                FetchError::Malformed("credentials unreadable".into()),
-                None,
-            ));
+            NoSignIn::signed_out(if profile.api_key {
+                FetchError::Unsupported
+            } else {
+                FetchError::AuthMissing
+            })
         }
     };
-    let file: CredentialsFile = serde_json::from_str(&text).map_err(|_| {
-        NoSignIn::unverified(FetchError::Malformed("credentials schema".into()), None)
-    })?;
+    let text = match read_limited(&config.join(".credentials.json"), MAX_CREDENTIALS) {
+        Ok(text) => text,
+        Err(ReadError::Missing) => return Err(absent()),
+        Err(ReadError::TooLarge | ReadError::Unreadable) => {
+            return Err(NoSignIn::unverified(FetchError::CredentialsInvalid, None));
+        }
+    };
+    let file: CredentialsFile = serde_json::from_str(&text)
+        .map_err(|_| NoSignIn::unverified(FetchError::CredentialsInvalid, None))?;
     let Some(oauth) = file.oauth else {
         return Err(absent());
     };
     let plan = oauth.subscription_type.as_deref().map(title_case);
     let Some(access_token) = oauth.access_token.filter(|token| !token.is_empty()) else {
-        // The CLI logged out and blanked its token.
-        return Err(NoSignIn::signed_out(FetchError::AuthMissing));
+        // The CLI blanks its token on logout, and a host app may supply the
+        // credential instead of this file.
+        return Err(absent());
     };
     // `user:profile` grants access to the usage endpoint. Tokens minted for
     // inference only (for example by `claude setup-token`) cannot read it.
@@ -252,6 +269,26 @@ fn known_window(key: &str) -> Option<(&'static str, &'static str, u32)> {
     })
 }
 
+/// Duration of a key that is not known yet but follows a known window family
+/// (`five_hour_*`, `seven_day_*`). Anything else has no window semantics.
+fn window_family(key: &str) -> Option<u32> {
+    let suffix = |prefix: &str| {
+        key.strip_prefix(prefix).is_some_and(|rest| {
+            !rest.is_empty()
+                && rest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        })
+    };
+    if suffix("five_hour_") {
+        Some(300)
+    } else if suffix("seven_day_") {
+        Some(10_080)
+    } else {
+        None
+    }
+}
+
 fn camel(key: &str) -> String {
     let mut out = String::new();
     let mut upper = false;
@@ -268,45 +305,69 @@ fn camel(key: &str) -> String {
     out
 }
 
-fn reset(value: &Value) -> Option<String> {
+fn reset(value: &Value, now: DateTime<Utc>) -> Option<String> {
     let text = value.as_str()?;
-    let time = DateTime::parse_from_rfc3339(text).ok()?;
-    Some(super::adapter::rfc3339(time.with_timezone(&Utc)))
+    let time = DateTime::parse_from_rfc3339(text).ok()?.with_timezone(&Utc);
+    time::plausible_reset(Some(time), now).map(super::adapter::rfc3339)
+}
+
+fn utilization(entry: &Value, key: &str) -> Option<u8> {
+    let checked = entry["utilization"].as_f64().and_then(percent);
+    if checked.is_none() {
+        schema_anomaly(
+            Provider::ClaudeCode,
+            &format!("{key}.utilization outside 0-100"),
+        );
+    }
+    checked
 }
 
 /// Normalizes the internal `oauth/usage` response. `utilization` is a
-/// percentage between 0 and 100. Windows with `null` utilization are not in use
-/// for the account and are skipped.
-pub fn parse_usage(body: &str) -> Result<Vec<Quota>, FetchError> {
+/// percentage between 0 and 100. Windows with `null` utilization are not in
+/// use for the account and are skipped.
+///
+/// Semantics are explicit (audit I08): only known keys may become the primary
+/// metric, and at least one of them must be valid for a reading. New keys of
+/// a known family (`five_hour_*`, `seven_day_*`) are listed but never drawn.
+/// Other keys have no window semantics and are ignored.
+pub fn parse_usage(body: &str, now: DateTime<Utc>) -> Result<Vec<Quota>, FetchError> {
     let value: Value =
         serde_json::from_str(body).map_err(|_| FetchError::Malformed("usage json".into()))?;
     let Some(object) = value.as_object() else {
         return Err(FetchError::Malformed("usage root".into()));
     };
     let mut quotas = Vec::new();
-    for (key, entry) in object {
-        if key == "extra_usage" {
+    for (key, entry) in object.iter().take(MAX_USAGE_KEYS) {
+        if key == "extra_usage" || entry.get("utilization").is_none_or(Value::is_null) {
             continue;
         }
-        let Some(utilization) = entry.get("utilization").and_then(Value::as_f64) else {
+        let (id, label, minutes, eligible) = match (known_window(key), window_family(key)) {
+            (Some((id, label, minutes)), _) => (id.to_string(), label.to_string(), minutes, true),
+            (None, Some(minutes)) => (camel(key), title_case(key), minutes, false),
+            (None, None) => {
+                schema_anomaly(
+                    Provider::ClaudeCode,
+                    &format!("{key} has no window semantics"),
+                );
+                continue;
+            }
+        };
+        let Some(used) = utilization(entry, key) else {
             continue;
         };
-        let (id, label, minutes) = match known_window(key) {
-            Some((id, label, minutes)) => (id.to_string(), label.to_string(), Some(minutes)),
-            None => (
-                camel(key),
-                title_case(key),
-                key.starts_with("seven_day").then_some(10_080),
-            ),
-        };
         quotas.push(Quota {
-            id,
-            label,
-            kind: QuotaKind::Window,
-            percent_used: percent(utilization),
-            duration_minutes: minutes,
-            resets_at: reset(&entry["resets_at"]),
+            eligible,
+            ..Quota::window(
+                id,
+                label,
+                used,
+                Some(minutes),
+                reset(&entry["resets_at"], now),
+            )
         });
+    }
+    if !quotas.iter().any(|quota| quota.eligible) {
+        return Err(FetchError::Malformed("no known usage window".into()));
     }
     // Keep a stable order: shorter windows first, then by identifier.
     quotas.sort_by(|a, b| {
@@ -317,39 +378,44 @@ pub fn parse_usage(body: &str) -> Result<Vec<Quota>, FetchError> {
     });
 
     let extra = &value["extra_usage"];
-    if let (Some(true), Some(utilization)) =
-        (extra["is_enabled"].as_bool(), extra["utilization"].as_f64())
+    if extra["is_enabled"].as_bool() == Some(true)
+        && let Some(used) = utilization(extra, "extra_usage")
     {
         quotas.push(Quota {
-            id: "extraUsage".into(),
-            label: "Uso extra · mensal".into(),
             kind: QuotaKind::Credits,
-            percent_used: percent(utilization),
-            duration_minutes: None,
-            resets_at: None,
+            eligible: false,
+            ..Quota::window("extraUsage", "Uso extra · mensal", used, None, None)
         });
-    }
-    if !quotas.iter().any(|quota| quota.kind == QuotaKind::Window) {
-        return Err(FetchError::Malformed("no usage windows".into()));
     }
     Ok(quotas)
 }
 
 /// Sums the tokens of assistant turns written to local session transcripts in
-/// the last five hours. Streamed turns repeat the same message id, so each id
-/// counts once. Cache reads are excluded: they re-read context already counted.
+/// the last five hours. Cache reads are excluded: they re-read context
+/// already counted.
+///
+/// Streamed turns repeat the same message id with growing totals, so each id
+/// keeps its largest value, wherever it appears. The scan runs within a
+/// cumulative budget of entries, files, bytes, records and time; when a limit
+/// is reached the result is marked partial (audit I06).
 pub fn local_activity(projects: &Path, now: DateTime<Utc>) -> Option<LocalActivity> {
     let since = time::minus(now, TimeDelta::minutes(i64::from(ACTIVITY_MINUTES)));
     let since_file = time::system_time(since)?;
-    let mut seen = HashSet::new();
+    let mut budget = Budget::transcripts();
+    let mut turns: HashMap<String, u64> = HashMap::new();
     let mut sessions = HashSet::new();
-    let mut tokens = 0u64;
     let directories = fs::read_dir(projects).ok()?;
-    for directory in directories.flatten() {
+    'scan: for directory in directories.flatten() {
+        if !budget.entry() {
+            break;
+        }
         let Ok(files) = fs::read_dir(directory.path()) else {
             continue;
         };
         for file in files.flatten() {
+            if !budget.entry() {
+                break 'scan;
+            }
             let path = file.path();
             let recent = file
                 .metadata()
@@ -358,10 +424,13 @@ pub fn local_activity(projects: &Path, now: DateTime<Utc>) -> Option<LocalActivi
             if !recent || path.extension().is_none_or(|ext| ext != "jsonl") {
                 continue;
             }
-            let Ok(text) = read_tail(&path, TRANSCRIPT_TAIL) else {
+            let Ok(text) = read_tail_within(&path, TRANSCRIPT_TAIL, &mut budget) else {
                 continue;
             };
             for line in text.lines().filter(|line| line.contains("\"usage\"")) {
+                if !budget.record() {
+                    break 'scan;
+                }
                 let Ok(record) = serde_json::from_str::<Value>(line) else {
                     continue;
                 };
@@ -378,19 +447,20 @@ pub fn local_activity(projects: &Path, now: DateTime<Utc>) -> Option<LocalActivi
                     continue;
                 }
                 let message = &record["message"];
-                let id = message["id"].as_str().unwrap_or_default().to_owned();
-                if id.is_empty() || !seen.insert(id) {
+                let Some(id) = message["id"].as_str().filter(|id| !id.is_empty()) else {
                     continue;
-                }
+                };
                 let usage = &message["usage"];
-                tokens = [
+                let total = [
                     "input_tokens",
                     "cache_creation_input_tokens",
                     "output_tokens",
                 ]
                 .iter()
                 .filter_map(|key| usage[*key].as_u64())
-                .fold(tokens, u64::saturating_add);
+                .fold(0, u64::saturating_add);
+                let kept = turns.entry(id.to_owned()).or_default();
+                *kept = (*kept).max(total);
                 if let Some(session) = record["sessionId"].as_str() {
                     sessions.insert(session.to_owned());
                 }
@@ -399,14 +469,33 @@ pub fn local_activity(projects: &Path, now: DateTime<Utc>) -> Option<LocalActivi
     }
     Some(LocalActivity {
         window_minutes: ACTIVITY_MINUTES,
-        tokens,
-        sessions: sessions.len() as u32,
+        tokens: turns.values().copied().fold(0, u64::saturating_add),
+        sessions: u32::try_from(sessions.len()).unwrap_or(u32::MAX),
+        partial: budget.exhausted(),
     })
+}
+
+impl<T: Transport> ClaudeCode<T> {
+    fn current_session(&self, now: DateTime<Utc>) -> Session {
+        let Some(config) = &self.config else {
+            return Session::SignedOut;
+        };
+        let profile = read_profile(self.profile.as_deref());
+        match read_sign_in(config, &profile, now) {
+            Ok(sign_in) => session(&profile, &sign_in.access_token),
+            Err(failure) if failure.signed_out => Session::SignedOut,
+            Err(_) => session(&profile, ""),
+        }
+    }
 }
 
 impl<T: Transport> UsageAdapter for ClaudeCode<T> {
     fn provider(&self) -> Provider {
         Provider::ClaudeCode
+    }
+
+    fn session(&self, now: DateTime<Utc>) -> Option<Session> {
+        Some(self.current_session(now))
     }
 
     fn fetch(&self, now: DateTime<Utc>) -> Outcome {
@@ -416,50 +505,54 @@ impl<T: Transport> UsageAdapter for ClaudeCode<T> {
         let profile = read_profile(self.profile.as_deref());
         let mut outcome = Outcome {
             account: profile.account.clone(),
-            activity: local_activity(&config.join("projects"), now),
             ..Outcome::default()
         };
 
-        let sign_in = match read_sign_in(config, profile.api_key, now) {
-            Ok(sign_in) => sign_in,
-            Err(failure) => {
-                if failure.signed_out {
-                    // No session: neither its labels nor its quotas apply.
-                    outcome.session = Session::SignedOut;
-                    outcome.account = None;
-                } else {
-                    // A sign-in exists (expired, restricted or unreadable).
-                    // Its account is the profile's, when the profile has one.
-                    outcome.session = session(&profile, "");
-                    outcome.plan = failure.plan;
-                }
+        match read_sign_in(config, &profile, now) {
+            Err(failure) if failure.signed_out => {
+                // No session: neither its labels, its quotas nor its local
+                // activity are read.
+                outcome.session = Session::SignedOut;
+                outcome.account = None;
                 outcome.result = Some(Err(failure.error));
                 return outcome;
             }
-        };
-        outcome.session = session(&profile, &sign_in.access_token);
-        outcome.plan = sign_in.plan.clone();
-        let response = self.transport.get(
-            USAGE_URL,
-            &[
-                ("Authorization", &format!("Bearer {}", sign_in.access_token)),
-                ("anthropic-beta", OAUTH_BETA),
-                ("Accept", "application/json"),
-            ],
-        );
-        drop(sign_in);
-        outcome.result = Some(
-            check_status(response, now)
-                .and_then(|response| parse_usage(&response.body))
-                .map(|quotas| Fetched {
-                    identity: outcome.session.identity(),
-                    account: outcome.account.clone(),
-                    plan: outcome.plan.clone(),
-                    origin: Origin::Api,
-                    quotas,
-                    observed_at: now,
-                }),
-        );
+            Err(failure) => {
+                // A sign-in exists (expired, restricted, unavailable to this
+                // app or unreadable). Its account is the profile's, if known.
+                outcome.session = session(&profile, "");
+                outcome.plan = failure.plan;
+                outcome.result = Some(Err(failure.error));
+            }
+            Ok(sign_in) => {
+                outcome.session = session(&profile, &sign_in.access_token);
+                outcome.plan = sign_in.plan.clone();
+                let response = self.transport.get(
+                    USAGE_URL,
+                    &[
+                        ("Authorization", &format!("Bearer {}", sign_in.access_token)),
+                        ("anthropic-beta", OAUTH_BETA),
+                        ("Accept", "application/json"),
+                    ],
+                );
+                drop(sign_in);
+                outcome.result = Some(
+                    check_status(response, now)
+                        .and_then(|response| parse_usage(&response.body, now))
+                        .map(|quotas| Fetched {
+                            identity: outcome.session.identity(),
+                            account: outcome.account.clone(),
+                            plan: outcome.plan.clone(),
+                            origin: Origin::Api,
+                            quotas,
+                            observed_at: now,
+                        }),
+                );
+            }
+        }
+        // Local activity is read after the quota attempt, so its scan never
+        // delays the sign-in check or the request.
+        outcome.activity = local_activity(&config.join("projects"), now);
         outcome
     }
 }
@@ -520,7 +613,7 @@ mod tests {
 
     #[test]
     fn parses_windows_in_order_and_keeps_extra_usage_as_credits() {
-        let quotas = parse_usage(USAGE).unwrap();
+        let quotas = parse_usage(USAGE, now()).unwrap();
         let ids: Vec<_> = quotas.iter().map(|quota| quota.id.as_str()).collect();
         assert_eq!(ids, ["fiveHour", "sevenDay", "sevenDayOpus", "extraUsage"]);
         assert_eq!(quotas[0].percent_used, 37);
@@ -532,18 +625,54 @@ mod tests {
 
     #[test]
     fn unknown_windows_are_kept_with_a_readable_label() {
-        let quotas =
-            parse_usage(r#"{"seven_day_cowork":{"utilization":5,"resets_at":null}}"#).unwrap();
-        assert_eq!(quotas[0].id, "sevenDayCowork");
-        assert_eq!(quotas[0].label, "Seven day cowork");
-        assert_eq!(quotas[0].duration_minutes, Some(10_080));
+        let quotas = parse_usage(
+            r#"{"five_hour":{"utilization":1},"seven_day_cowork":{"utilization":99,"resets_at":null}}"#,
+            now(),
+        )
+        .unwrap();
+        assert_eq!(quotas[1].id, "sevenDayCowork");
+        assert_eq!(quotas[1].label, "Seven day cowork");
+        assert_eq!(quotas[1].duration_minutes, Some(10_080));
+        // I08: listed, but never the primary metric.
+        assert!(!quotas[1].eligible);
+        assert!(quotas[0].eligible);
+    }
+
+    #[test]
+    fn i08_responses_without_trustworthy_semantics_are_rejected() {
+        for body in [
+            // Only a future metric of a known family.
+            r#"{"seven_day_cowork":{"utilization":5}}"#,
+            // A top-level object with utilization but no window semantics.
+            r#"{"monthly_tokens":{"utilization":50}}"#,
+            // Only credits.
+            r#"{"extra_usage":{"is_enabled":true,"utilization":20}}"#,
+            // Known window outside the percentage domain.
+            r#"{"five_hour":{"utilization":250}}"#,
+            r#"{"five_hour":{"utilization":-4}}"#,
+        ] {
+            assert!(
+                matches!(parse_usage(body, now()), Err(FetchError::Malformed(_))),
+                "{body}"
+            );
+        }
+        // An invalid window is dropped when a valid one remains; an
+        // implausible renewal becomes unknown.
+        let quotas = parse_usage(
+            r#"{"five_hour":{"utilization":20,"resets_at":"2099-01-01T00:00:00Z"},
+                "seven_day":{"utilization":1e9},"odd":{"utilization":3}}"#,
+            now(),
+        )
+        .unwrap();
+        assert_eq!(quotas.len(), 1);
+        assert_eq!(quotas[0].resets_at, None);
     }
 
     #[test]
     fn malformed_responses_are_rejected() {
         for body in ["", "null", "{}", r#"{"five_hour":{"utilization":"high"}}"#] {
             assert!(
-                matches!(parse_usage(body), Err(FetchError::Malformed(_))),
+                matches!(parse_usage(body, now()), Err(FetchError::Malformed(_))),
                 "{body}"
             );
         }
@@ -699,18 +828,88 @@ mod tests {
     #[test]
     fn b01_logout_is_a_signed_out_session_without_labels() {
         let dir = TempDir::new("claude-logout");
-        profile(&dir, "uuid-a", "dev@example.com");
+        dir.write("profile.json", r#"{"oauthAccount":null}"#);
         let adapter = adapter_in(&dir, Script::new(vec![]));
         let missing = adapter.fetch(now());
         assert_eq!(missing.session, Session::SignedOut);
+        assert_eq!(missing.result, Some(Err(FetchError::AuthMissing)));
         assert_eq!(missing.account, None);
+        assert_eq!(
+            missing.activity, None,
+            "no transcript scan without a session"
+        );
         credentials(&dir, "");
         let blank = adapter.fetch(now());
         assert_eq!(blank.session, Session::SignedOut);
         assert_eq!(blank.result, Some(Err(FetchError::AuthMissing)));
-        // A partially written file proves nothing.
+        assert_eq!(adapter.transport.request_count(), 0);
+    }
+
+    #[test]
+    fn i06_a_missing_file_with_an_account_profile_is_not_a_logout() {
+        // Claude Desktop or another host may hold the credential.
+        let dir = TempDir::new("claude-unavailable");
+        profile(&dir, "uuid-a", "dev@example.com");
+        let adapter = adapter_in(&dir, Script::new(vec![]));
+        let missing = adapter.fetch(now());
+        assert_eq!(
+            missing.result,
+            Some(Err(FetchError::CredentialsUnavailable))
+        );
+        assert!(missing.session.identity().is_some());
+        assert_eq!(missing.account.as_deref(), Some("d•••@example.com"));
+        credentials(&dir, "");
+        assert_eq!(
+            adapter.fetch(now()).result,
+            Some(Err(FetchError::CredentialsUnavailable))
+        );
+        // A partially written or oversized file is invalid, and proves nothing.
         dir.write("config/.credentials.json", r#"{"claudeAiOauth": {"acc"#);
-        assert!(adapter.fetch(now()).session.identity().is_some());
+        let partial = adapter.fetch(now());
+        assert_eq!(partial.result, Some(Err(FetchError::CredentialsInvalid)));
+        assert!(partial.session.identity().is_some());
+        dir.write("config/.credentials.json", &" ".repeat(300 * 1024));
+        assert_eq!(
+            adapter.fetch(now()).result,
+            Some(Err(FetchError::CredentialsInvalid))
+        );
+        dir.write("config/.credentials.json", "[1, 2]");
+        assert_eq!(
+            adapter.fetch(now()).result,
+            Some(Err(FetchError::CredentialsInvalid))
+        );
+        assert_eq!(adapter.transport.request_count(), 0);
+    }
+
+    #[test]
+    fn i06_absent_scopes_are_attempted_and_a_refusal_is_reported() {
+        let dir = TempDir::new("claude-no-scopes");
+        profile(&dir, "uuid-a", "dev@example.com");
+        dir.write(
+            "config/.credentials.json",
+            &json!({ "claudeAiOauth": { "accessToken": "t",
+                "expiresAt": now().timestamp_millis() + 3_600_000 } })
+            .to_string(),
+        );
+        let adapter = adapter_in(&dir, Script::new(vec![Script::ok(403, "{}")]));
+        assert_eq!(
+            adapter.fetch(now()).result,
+            Some(Err(FetchError::AuthRejected))
+        );
+        assert_eq!(adapter.transport.request_count(), 1);
+    }
+
+    #[test]
+    fn i06_the_session_probe_reads_local_files_only() {
+        let dir = TempDir::new("claude-probe");
+        profile(&dir, "uuid-a", "dev@example.com");
+        credentials(&dir, "token-1");
+        let adapter = adapter_in(&dir, Script::new(vec![]));
+        let first = adapter.session(now()).unwrap();
+        credentials(&dir, "token-2");
+        let renewed = adapter.session(now()).unwrap();
+        assert_eq!(first.identity(), renewed.identity());
+        assert_ne!(first, renewed);
         assert_eq!(adapter.transport.request_count(), 0);
     }
 
@@ -759,5 +958,33 @@ mod tests {
         assert_eq!(activity.tokens, 115 + 150);
         assert_eq!(activity.sessions, 2);
         assert_eq!(activity.window_minutes, 300);
+    }
+
+    #[test]
+    fn i06_a_streamed_turn_keeps_its_final_total_and_the_scan_is_bounded() {
+        let dir = TempDir::new("claude-progressive");
+        let turn = |output: u64| {
+            json!({ "type": "assistant", "sessionId": "s1", "timestamp": "2026-11-23T17:00:00Z",
+                "message": { "id": "m", "usage": { "input_tokens": 10, "output_tokens": output } } })
+            .to_string()
+        };
+        // The first record of the id is partial; a later one has the total.
+        dir.write(
+            "projects/p/a.jsonl",
+            &[turn(5), turn(50), turn(20)].join(
+                "
+",
+            ),
+        );
+        let activity = local_activity(&dir.path().join("projects"), now()).unwrap();
+        assert_eq!(activity.tokens, 60);
+        assert!(!activity.partial);
+
+        // Many files: the cumulative budget stops the scan and says so.
+        for index in 0..300 {
+            dir.write(&format!("projects/p/{index}.jsonl"), &turn(1));
+        }
+        let activity = local_activity(&dir.path().join("projects"), now()).unwrap();
+        assert!(activity.partial);
     }
 }

@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import type { Provider, Snapshot, Usage } from "../usage/model";
+import type { Provider, Usage, UsageUpdate } from "../usage/model";
+import type { SelectionOrder } from "./ordering";
 import type { RailShifts, Side } from "./railGeometry";
 
 export interface RailPlacement {
@@ -13,13 +14,12 @@ export interface RailActive {
   provider: Provider | null;
 }
 
-export interface SummarySelection {
+export interface SummarySelection extends SelectionOrder {
   usage: Usage;
-  revision: number;
   side: Side;
 }
 
-export const getUsage = () => invoke<Snapshot>("get_usage");
+export const getUsage = () => invoke<UsageUpdate>("get_usage");
 export const refreshUsage = (provider: Provider | null) =>
   invoke<void>("refresh_usage", { provider });
 export const getRailPlacement = () =>
@@ -42,7 +42,10 @@ export const onRailPlacement = (handler: (payload: RailPlacement) => void) =>
   listen("rail-placement", handler);
 export const onRailActive = (handler: (payload: RailActive) => void) =>
   listen("rail-active", handler);
-export const onUsageUpdated = (handler: (payload: Snapshot) => void) =>
+/** Rust found the stored pointer stale: report the indicator again. */
+export const onRailPointerReset = (handler: (generation: number) => void) =>
+  listen("rail-pointer-reset", handler);
+export const onUsageUpdated = (handler: (payload: UsageUpdate) => void) =>
   listen("usage-updated", handler);
 export const onSummarySelection = (
   handler: (payload: SummarySelection) => void,

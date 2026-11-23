@@ -17,16 +17,18 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use chrono::Utc;
-
 pub use adapter::UsageAdapter;
-pub use model::{Provider, Snapshot, Usage};
+pub use model::{Provider, Snapshot, Usage, UsageUpdate};
 
 use crate::sync::{lock, wait_timeout_while};
 use adapter::{FetchError, Outcome};
-use scheduler::{Policy, Tracker};
+use scheduler::{Now, Policy, Tracker};
 
 type Notify = Box<dyn Fn() + Send + Sync>;
+
+/// Longest sleep of a worker: an upper bound for clock-change recovery.
+const MAX_SLEEP: Duration = Duration::from_secs(300);
+const MIN_SLEEP: Duration = Duration::from_millis(250);
 
 struct Slot {
     adapter: Box<dyn UsageAdapter>,
@@ -37,6 +39,9 @@ struct Slot {
 
 pub struct Service {
     slots: Vec<Arc<Slot>>,
+    /// Publication counter. Snapshots are taken while it is held, so a higher
+    /// sequence always carries newer data (audit I03).
+    sequence: Mutex<u64>,
 }
 
 impl Service {
@@ -45,7 +50,7 @@ impl Service {
     }
 
     fn with_policy(adapters: Vec<Box<dyn UsageAdapter>>, policy: Policy) -> Self {
-        let now = Utc::now();
+        let now = Now::current();
         Self {
             slots: adapters
                 .into_iter()
@@ -63,6 +68,7 @@ impl Service {
                     })
                 })
                 .collect(),
+            sequence: Mutex::new(0),
         }
     }
 
@@ -90,11 +96,21 @@ impl Service {
     }
 
     pub fn snapshot(&self) -> Snapshot {
-        let now = Utc::now();
+        let now = Now::current();
         self.slots
             .iter()
             .map(|slot| lock(&slot.tracker).usage(now))
             .collect()
+    }
+
+    /// The current snapshot with the next publication number.
+    pub fn update(&self) -> UsageUpdate {
+        let mut sequence = lock(&self.sequence);
+        *sequence = sequence.saturating_add(1);
+        UsageUpdate {
+            sequence: *sequence,
+            snapshot: self.snapshot(),
+        }
     }
 
     /// Starts one worker per provider. `notify` runs after every state change.
@@ -110,7 +126,7 @@ impl Service {
         }
     }
 
-    /// Requests an immediate refresh. Debounce and `Retry-After` still apply.
+    /// Requests an immediate refresh. The recovery rules still apply.
     pub fn refresh(&self, provider: Option<Provider>) {
         for slot in &self.slots {
             if provider.is_none_or(|provider| provider == slot.adapter.provider()) {
@@ -128,34 +144,51 @@ fn guarded<T>(job: impl FnOnce() -> T) -> Option<T> {
 }
 
 fn worker(slot: &Slot, notify: &Notify) {
+    // The last state announced, to publish transitions that happen without a
+    // network result (renewals, ageing, a logout seen by the probe).
+    let mut announced: Option<Usage> = None;
     loop {
         let manual = {
             let wait = {
-                let tracker = lock(&slot.tracker);
-                tracker
-                    .next_due()
-                    .signed_duration_since(Utc::now())
-                    .to_std()
-                    .unwrap_or(Duration::ZERO)
-                    .clamp(Duration::from_millis(250), Duration::from_secs(300))
+                let now = Now::current();
+                lock(&slot.tracker)
+                    .next_wake(now)
+                    .saturating_duration_since(now.instant)
+                    .clamp(MIN_SLEEP, MAX_SLEEP)
             };
             let manual = lock(&slot.manual);
             let mut manual = wait_timeout_while(&slot.wake, manual, wait, |manual| !*manual);
             std::mem::take(&mut *manual)
         };
 
-        let now = Utc::now();
-        {
+        let now = Now::current();
+        // Local files only: a logout, a switch or a renewed credential is
+        // noticed before the gates are evaluated.
+        let probe = guarded(|| slot.adapter.session(now.utc)).flatten();
+        let current = {
             let mut tracker = lock(&slot.tracker);
-            if !tracker.should_fetch(now, manual) {
-                continue;
+            if let Some(session) = probe {
+                tracker.probe(session, now);
             }
-            tracker.begin(now);
+            if tracker.should_fetch(now, manual) {
+                tracker.begin(now);
+                None
+            } else {
+                Some(tracker.usage(now))
+            }
+        };
+        if let Some(current) = current {
+            if announced.as_ref() != Some(&current) {
+                announced = Some(current);
+                guarded(notify);
+            }
+            continue;
         }
+
         guarded(notify);
         // A panicking adapter (for example on a response nobody anticipated)
         // ends this attempt as malformed. The worker keeps running.
-        let outcome = guarded(|| slot.adapter.fetch(Utc::now())).unwrap_or_else(|| {
+        let outcome = guarded(|| slot.adapter.fetch(now.utc)).unwrap_or_else(|| {
             eprintln!(
                 "Aurora Control: the {:?} adapter panicked",
                 slot.adapter.provider()
@@ -164,25 +197,25 @@ fn worker(slot: &Slot, notify: &Notify) {
         });
         {
             let mut tracker = lock(&slot.tracker);
-            let now = Utc::now();
+            let now = Now::current();
             if guarded(|| tracker.finish(outcome, now)).is_none() {
                 tracker.abort(now);
             }
+            announced = Some(tracker.usage(now));
         }
         guarded(notify);
     }
 }
 
 #[tauri::command]
-pub fn get_usage(service: tauri::State<'_, Service>) -> Snapshot {
-    service.snapshot()
+pub fn get_usage(service: tauri::State<'_, Service>) -> UsageUpdate {
+    service.update()
 }
 
 #[tauri::command]
 pub fn refresh_usage(service: tauri::State<'_, Service>, provider: Option<Provider>) {
     service.refresh(provider);
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,6 +252,12 @@ mod tests {
         assert_eq!(codex["window"]["id"], "codex-primary");
         assert_eq!(codex["window"]["durationMinutes"], 300);
         assert_eq!(codex["quotas"][0]["kind"], "window");
+        assert_eq!(codex["quotas"][0]["renewed"], false);
+        assert_eq!(codex["window"]["renewed"], false);
+        assert!(
+            codex["quotas"][0].get("eligible").is_none(),
+            "internal flag stays in Rust"
+        );
         assert_eq!(codex["issue"], json!(null));
         assert_eq!(codex["refreshing"], false);
         assert!(codex["updatedAt"].as_str().unwrap().ends_with('Z'));
@@ -228,7 +267,7 @@ mod tests {
         assert_eq!(claude["percentUsed"], 37);
         assert_eq!(
             claude["activity"],
-            json!({ "windowMinutes": 300, "tokens": 184250, "sessions": 2 })
+            json!({ "windowMinutes": 300, "tokens": 184250, "sessions": 2, "partial": false })
         );
     }
 
@@ -244,7 +283,7 @@ mod tests {
             Provider::Codex
         }
 
-        fn fetch(&self, now: chrono::DateTime<Utc>) -> Outcome {
+        fn fetch(&self, now: chrono::DateTime<chrono::Utc>) -> Outcome {
             let call = {
                 let mut calls = lock(&self.calls);
                 *calls += 1;
@@ -267,6 +306,7 @@ mod tests {
             })],
             Policy {
                 manual_gap: Duration::ZERO,
+                backoff_min: Duration::ZERO,
                 ..Policy::default()
             },
         );
@@ -298,6 +338,35 @@ mod tests {
     }
 
     #[test]
+    fn i03_publication_sequences_strictly_increase_across_threads() {
+        let service = Arc::new(Service::new(
+            demo::DemoAdapter::from_env(Some("10,20"))
+                .unwrap()
+                .into_iter()
+                .map(|adapter| Box::new(adapter) as Box<dyn UsageAdapter>)
+                .collect(),
+        ));
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                let service = Arc::clone(&service);
+                std::thread::spawn(move || {
+                    (0..50)
+                        .map(|_| service.update().sequence)
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        let mut all: Vec<u64> = threads
+            .into_iter()
+            .flat_map(|thread| thread.join().unwrap())
+            .collect();
+        let count = all.len();
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(all.len(), count, "no sequence is published twice");
+        assert_eq!(*lock(&service.sequence), count as u64);
+    }
+    #[test]
     fn issues_serialize_with_a_code_tag() {
         let issue = model::Issue::RateLimited {
             retry_at: Some("2026-11-23T18:10:00Z".into()),
@@ -307,8 +376,12 @@ mod tests {
             json!({ "code": "rateLimited", "retryAt": "2026-11-23T18:10:00Z" })
         );
         assert_eq!(
-            serde_json::to_value(model::Issue::Http { status: 503 }).unwrap(),
-            json!({ "code": "http", "status": 503 })
+            serde_json::to_value(model::Issue::Http {
+                status: 503,
+                retry_at: None
+            })
+            .unwrap(),
+            json!({ "code": "http", "status": 503, "retryAt": null })
         );
     }
 }
