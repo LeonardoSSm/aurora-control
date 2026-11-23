@@ -1,5 +1,7 @@
 # Continuação com Claude Code
 
+> **Documento histórico da Etapa A.** A Etapa B implementou os adaptadores reais e redesenhou os indicadores. Os contratos abaixo foram ampliados. O estado atual está em [architecture.md](architecture.md) e a auditoria da Etapa B em [audit-cycle-01-stage-b.md](audit-cycle-01-stage-b.md).
+
 ## Ponto de partida
 
 Trabalhar a partir de `feat/cycle-01-shell`. O [README](../README.md) reúne os comandos de verificação e de build no Windows, e a [arquitetura](architecture.md) descreve o IPC e o gerenciamento de janelas. O adaptador selecionado na inicialização é `DemoAdapter`, em `src-tauri/src/main.rs`.

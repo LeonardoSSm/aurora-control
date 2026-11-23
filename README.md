@@ -1,14 +1,17 @@
 # Aurora Control
 
-Barra de utilização para Windows 11 com indicadores de Codex e Claude Code. A versão 0.1.0 usa dados fictícios, sinalizados na barra e nos resumos.
+Barra de utilização para Windows 11 com indicadores de Codex e Claude Code. O app lê a sessão local de cada ferramenta e consulta o consumo real da conta, sem renovar tokens nem alterar arquivos dos provedores.
 
 ## Uso
 
-1. Abra `aurora-control.exe`. Os semicírculos de Codex e Claude Code ficam presos à lateral direita da área útil do monitor principal.
-2. Passe o ponteiro sobre um indicador para expandi-lo e ver a conta, a janela de consumo, a renovação e a última atualização. O resumo abre para dentro da tela.
-3. Clique no ícone da bandeja para mostrar ou ocultar a barra. O menu de contexto permite escolher uma lateral ou encerrar o app. Se o ícone estiver recolhido, abra a área de ícones ocultos da bandeja.
+1. Abra `aurora-control.exe`. Os semicírculos de Codex e Claude Code ficam presos à lateral direita da área útil do monitor principal. O arco de cada um mostra o consumo da janela mais restritiva: vazio em 0%, até o ponto mais interno em 50% e até o topo em 100%.
+2. Pare o ponteiro sobre um indicador. O círculo desliza para dentro e o resumo mostra a conta, a janela principal, a renovação, as outras cotas, a atividade local e o estado da conexão. Você pode levar o cursor até o resumo sem que ele feche, e os cliques passam através dele.
+3. Clique em um indicador ou use "Atualizar agora" na bandeja para forçar uma leitura. O app consulta a cada 5 minutos e respeita os limites dos provedores.
+4. Clique no ícone da bandeja para mostrar ou ocultar a barra. O menu de contexto permite escolher a lateral, atualizar ou encerrar. Se o ícone estiver recolhido, abra a área de ícones ocultos da bandeja.
 
-A lateral escolhida vale durante a execução. Cada nova execução começa na direita.
+Requisitos das contas: Codex autenticado com ChatGPT (`codex login`) e Claude Code autenticado no terminal (`claude`). Logins por chave de API não expõem cotas de assinatura, e o app informa isso.
+
+Variáveis opcionais: `AURORA_SIDE=left` inicia na esquerda. `AURORA_DEMO=1`, ou `AURORA_DEMO=73,25` para escolher os percentuais, usa dados fictícios sem acessar contas nem rede.
 
 ## Compilação no Windows
 
@@ -30,4 +33,5 @@ O executável fica em `src-tauri/target/release/aurora-control.exe` e o instalad
 Use `npm run desktop:debug` para compilar o binário de depuração em `src-tauri/target/debug/aurora-control.exe`. Os builds usam os recursos produzidos em `dist/` e empacotados pelo Tauri.
 
 - [Decisões de arquitetura](docs/architecture.md)
-- [Continuação com Claude Code](docs/handoff-claude.md)
+- [Relatório da Etapa B para auditoria](docs/audit-cycle-01-stage-b.md)
+- [Histórico da Etapa A](docs/handoff-claude.md)
