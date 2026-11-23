@@ -1,0 +1,63 @@
+# Aurora Control 0.2.0 — validação interativa (build de debug, modo demo, Windows 11 26300, 1 monitor 1920x1080 a 100%)
+
+## validate-overlay.ps1 -Side right
+PASS  rail visible  hwnd <rail>
+PASS  summary hidden at start  
+PASS  rail geometry  (1860,457) 60x118
+PASS  no-activate tool window  0x8000198
+PASS  cursor moved  (1914,483)
+PASS  summary opens on hover (cold)  392 ms after the cursor arrived
+PASS  focus unchanged on hover  fg <console> pid <console> overlay=False
+PASS  summary opens inward  (1556,361)-(1852,606)
+PASS  summary click-through  
+PASS  closes after leaving  416 ms after the cursor left
+PASS  summary opens on hover (warm)  207 ms after the cursor arrived
+PASS  sweep does not open  
+PASS  rail corner click-through  
+PASS  switch keeps the card open  
+PASS  focus unchanged after switch  fg <console> pid <console> overlay=False
+PASS  controller batches traced  78 batches
+PASS  no re-entrant batch  
+PASS  single owner thread  
+PASS  batch latency  median 0,11 ms, max 127,89 ms
+Summary: 19/19 passed
+
+## validate-overlay.ps1 -Side left
+PASS  rail visible  hwnd <rail>
+PASS  summary hidden at start  
+PASS  rail geometry  (0,457) 60x118
+PASS  no-activate tool window  0x8000198
+PASS  cursor moved  (6,483)
+PASS  summary opens on hover (cold)  791 ms after the cursor arrived
+PASS  focus unchanged on hover  fg <console> pid <console> overlay=False
+PASS  summary opens inward  (68,361)-(364,606)
+PASS  summary click-through  
+PASS  closes after leaving  364 ms after the cursor left
+PASS  summary opens on hover (warm)  182 ms after the cursor arrived
+PASS  sweep does not open  
+PASS  rail corner click-through  
+PASS  switch keeps the card open  
+PASS  focus unchanged after switch  fg <console> pid <console> overlay=False
+PASS  controller batches traced  83 batches
+PASS  no re-entrant batch  
+PASS  single owner thread  
+PASS  batch latency  median 0,13 ms, max 119,86 ms
+Summary: 19/19 passed
+
+## validate-settings.ps1
+PASS  defaults: right edge  x 1860..1920
+PASS  defaults: two indicators  height 118
+PASS  second instance exits  exit code 0
+PASS  first instance keeps running  
+PASS  saved side: left edge  x 0
+PASS  one provider: single circle  height 52
+PASS  monitor fallback: primary  x 1860..1920
+PASS  monitor fallback: choice kept  
+PASS  corrupted: app starts on defaults  
+PASS  corrupted: original kept aside  preferences.corrupt-20261123T233257Z.json
+PASS  corrupted: no partial write  
+PASS  newer version: defaults in use  
+PASS  newer version: file untouched  
+PASS  AURORA_SIDE overrides  
+PASS  override not persisted  
+Summary: 15/15 passed

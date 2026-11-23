@@ -2,16 +2,21 @@
 
 ## Divisão de responsabilidades
 
-| Módulo                                               | Responsabilidade                                                             |
-| ---------------------------------------------------- | ---------------------------------------------------------------------------- |
-| `src/components/`, `src/rail.tsx`, `src/summary.tsx` | Indicadores semicirculares e cartão de resumo em React.                      |
-| `src/desktop/railGeometry.ts`                        | Geometria lógica dos indicadores e do arco, compartilhada com `position.rs`. |
-| `src/desktop/useRailMotion.ts`                       | Animação do deslizamento, sincronizada quadro a quadro com a região Win32.   |
-| `src/desktop/commands.ts`                            | Ponte tipada entre React e o IPC do Tauri.                                   |
-| `src/usage/`                                         | Contrato `Usage` em TypeScript e textos de apresentação.                     |
-| `src-tauri/src/usage/`                               | Contrato serializado, adaptadores, transporte HTTP, agendador e serviço.     |
-| `src-tauri/src/windows/`                             | Estado do hover, geometria física, regiões e posicionamento Win32.           |
-| `src-tauri/src/tray.rs`                              | Ícone e ações da bandeja: atualizar, mostrar/ocultar, lateral e encerrar.    |
+| Módulo                                               | Responsabilidade                                                                         |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `src/components/`, `src/rail.tsx`, `src/summary.tsx` | Indicadores semicirculares e cartão de resumo em React.                                  |
+| `src/desktop/railGeometry.ts`                        | Geometria lógica dos indicadores e do arco, compartilhada com `position.rs`.             |
+| `src/desktop/useRailMotion.ts`                       | Animação do deslizamento, sincronizada quadro a quadro com a região Win32.               |
+| `src/desktop/commands.ts`                            | Ponte tipada entre React e o IPC do Tauri.                                               |
+| `src/usage/`                                         | Contrato `Usage` em TypeScript e textos de apresentação.                                 |
+| `src-tauri/src/usage/`                               | Contrato serializado, adaptadores, transporte HTTP, agendador e serviço.                 |
+| `src-tauri/src/windows/`                             | Estado do hover, geometria física, regiões e posicionamento Win32.                       |
+| `src-tauri/src/tray.rs`                              | Ícone e ações da bandeja: atualizar, mostrar/ocultar, lateral, configurações e encerrar. |
+| `src/settings.tsx`, `src/components/Settings.tsx`    | Janela de configurações.                                                                 |
+| `src-tauri/src/preferences.rs`                       | Preferências versionadas e escrita atômica.                                              |
+| `src-tauri/src/settings.rs`                          | Comandos tipados da janela de configurações.                                             |
+| `src-tauri/src/autostart.rs`, `instance.rs`          | Inicialização com o Windows e instância única.                                           |
+| `src-tauri/src/windows/controller.rs`, `monitors.rs` | Dono único das mutações Win32 e escolha de monitor.                                      |
 
 ## Indicadores
 
@@ -36,27 +41,43 @@ O estado do hover pertence ao Rust (`windows/hover.rs`):
 
 O handshake do resumo continua por revisão: o `summary` sinaliza que está pronto, o Rust envia a seleção, o React renderiza e chama `show_summary(revision, height)` com a altura do conteúdo. O Rust só mostra a janela se a revisão ainda for a atual. Uma atualização de dados republica a mesma revisão: o cartão é re-renderizado no lugar, sem repetir a animação e sem mover a barra.
 
-`AURORA_SIDE=left` inicia na lateral esquerda. A bandeja troca o lado durante a execução.
+### Controlador de janelas (Ciclo 02)
+
+Toda mutação de HWND passa por `windows/controller.rs`. Callbacks de janela, bandeja, comandos IPC e temporizadores só enfileiram intenções. Uma thread dedicada junta os pedidos de layout e as leituras do cursor, e entrega um lote por vez à thread principal com `run_on_main_thread`. Como a chamada parte dessa thread, o lote é sempre postado no laço de eventos e roda depois do callback que o originou, nunca dentro dele. Enquanto um lote roda, nada mais é despachado, então a fila do laço não acumula trabalho vencido. Cada job relê o estado e revalida geração e revisão imediatamente antes da mutação nativa. `set_rail_motion` é um comando assíncrono que espera a resposta do lote sem bloquear a thread principal. Com `AURORA_TRACE=1`, cada lote registra jobs, espera, duração, thread e profundidade.
+
+A abertura por intenção usa um único prazo cancelável por barra. Ao vencer, o Rust confere `GetCursorPos` contra a elipse recortada do indicador no último quadro aceito pelo Windows. Se o cursor estiver fora, um `pointerleave` foi perdido: o ponteiro armazenado é esquecido e a barra recebe `rail-pointer-reset` para voltar a informar no próximo movimento. A zona de fechamento usa a mesma elipse, mais a ponte e o cartão.
+
+Os snapshots de uso levam uma sequência monotônica (`UsageUpdate.sequence`), inclusive na leitura inicial por `get_usage`. As seleções do resumo levam revisão e sequência. As WebViews descartam qualquer evento mais antigo antes de renderizar ou chamar o IPC.
+
+### Monitores, DPI e preferências
+
+A geometria é um snapshot único (área útil, escala e número de indicadores visíveis) usado para HWND, região, zona de hover e resumo. O monitor vem de `EnumDisplayMonitors`, com DPI efetivo por monitor (`GetDpiForMonitor`) e identificador estável: um hash FNV do caminho de interface do dispositivo (`m-` e 16 dígitos hexadecimais), sem gravar o ID de hardware. Se o monitor escolhido estiver desconectado, a barra usa o principal sem apagar a preferência e volta ao escolhido quando ele reaparece. A cada 2 s, o controlador compara o snapshot com a topologia atual. Mudanças de área útil (barra de tarefas), de monitor principal, de conexão ou de DPI recolhem a barra e a reposicionam.
+
+As preferências ficam em `%APPDATA%\app.auroracontrol.desktop\preferences.json`, no formato versionado `version: 1`: lateral, monitor (`id` e nome), provedores visíveis e inicialização com o Windows. A escrita é atômica (arquivo temporário, `sync_all` e `rename`). Um arquivo ilegível, grande demais ou inválido é guardado como `preferences.corrupt-<data>.json` e os padrões entram em uso. Um arquivo de versão mais nova fica intacto até o usuário alterar algo. A precedência é ambiente (`AURORA_SIDE`), depois preferências, depois padrões, e a variável de ambiente nunca é gravada. Cache de uso, prazos de retry e identidades de conta nunca vão para esse arquivo.
+
+Um provedor oculto não é consultado nem tem arquivos lidos, e a barra encolhe para um círculo. Pelo menos um provedor fica visível. A inicialização com o Windows grava ou remove apenas o valor `Aurora Control` em `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, e só quando o usuário muda a opção. Uma segunda execução encontra o mutex `Local\app.auroracontrol.desktop.instance` e encerra antes de iniciar qualquer worker.
 
 ## Contrato de utilização
 
 `Usage` em `src/usage/model.ts` espelha `src-tauri/src/usage/model.rs` (campos em `camelCase`). Nenhum campo carrega credenciais.
 
-| Campo             | Semântica                                                                                                                                                                              |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `provider`        | `codex` ou `claudeCode`.                                                                                                                                                               |
-| `account`, `plan` | Rótulos de exibição. E-mails chegam mascarados (`d•••@dominio`).                                                                                                                       |
-| `source`          | `demo` ou `live`.                                                                                                                                                                      |
-| `origin`          | De onde veio a última leitura válida: `api`, `sessionLog` (registro local do próprio cliente) ou `fixture`.                                                                            |
-| `status`          | `available`, `stale` ou `unavailable`.                                                                                                                                                 |
-| `percentUsed`     | Percentual **consumido** da métrica principal, de 0 a 100. Presente em `available` e `stale`.                                                                                          |
-| `window`          | A métrica principal, identificada por `id` e `label`, com duração e renovação.                                                                                                         |
-| `quotas`          | As demais cotas (`window` ou `credits`), sem a principal.                                                                                                                              |
-| `activity`        | Tokens das sessões locais nas últimas 5 h. **Não é cota da conta.**                                                                                                                    |
-| `updatedAt`       | Momento da observação da última leitura válida.                                                                                                                                        |
-| `checkedAt`       | Última tentativa, bem-sucedida ou não.                                                                                                                                                 |
-| `issue`           | Causa da falta de leitura atual: `authMissing`, `authExpired`, `authRejected`, `unsupported`, `rateLimited` (com `retryAt`), `network`, `timeout`, `malformed`, `http` (com `status`). |
-| `refreshing`      | Há uma consulta em andamento.                                                                                                                                                          |
+| Campo              | Semântica                                                                                                                                                                                                                                                                                                                            |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `provider`         | `codex` ou `claudeCode`.                                                                                                                                                                                                                                                                                                             |
+| `account`, `plan`  | Rótulos de exibição. E-mails chegam mascarados (`d•••@dominio`).                                                                                                                                                                                                                                                                     |
+| `source`           | `demo` ou `live`.                                                                                                                                                                                                                                                                                                                    |
+| `origin`           | De onde veio a última leitura válida: `api`, `sessionLog` (registro local do próprio cliente) ou `fixture`.                                                                                                                                                                                                                          |
+| `status`           | `available`, `stale` ou `unavailable`.                                                                                                                                                                                                                                                                                               |
+| `percentUsed`      | Percentual **consumido** da métrica principal, de 0 a 100. Presente em `available` e `stale`.                                                                                                                                                                                                                                        |
+| `window`           | A métrica principal, identificada por `id` e `label`, com duração e renovação.                                                                                                                                                                                                                                                       |
+| `quotas`           | As demais cotas (`window` ou `credits`), sem a principal.                                                                                                                                                                                                                                                                            |
+| `activity`         | Tokens das sessões locais nas últimas 5 h. **Não é cota da conta.**                                                                                                                                                                                                                                                                  |
+| `updatedAt`        | Momento da observação da última leitura válida.                                                                                                                                                                                                                                                                                      |
+| `checkedAt`        | Última tentativa, bem-sucedida ou não.                                                                                                                                                                                                                                                                                               |
+| `issue`            | Causa da falta de leitura atual: `authMissing`, `authExpired`, `authRejected`, `credentialsUnavailable` (credencial fora de um arquivo que o app lê), `credentialsInvalid` (arquivo local ilegível ou inválido), `unsupported`, `rateLimited` (com `retryAt`), `network`, `timeout`, `malformed`, `http` (com `status` e `retryAt`). |
+| `refreshing`       | Há uma consulta em andamento.                                                                                                                                                                                                                                                                                                        |
+| `renewed`          | Em `window` e em cada cota: a janela renovou sem nova medição, e o percentual não é leitura.                                                                                                                                                                                                                                         |
+| `activity.partial` | Um limite de leitura foi atingido e os totais cobrem só parte das transcrições.                                                                                                                                                                                                                                                      |
 
 A métrica principal é a janela mais restritiva, ou seja, a de maior percentual consumido. Em empate, vence a mais curta. Créditos nunca são a principal. Exemplo real: com 0% na janela de 5 h e 73% na semanal, o círculo mostra 73% e o rótulo `7 d`.
 
@@ -69,17 +90,17 @@ O transporte HTTP é o trait `Transport`. A implementação de produção usa `u
 ### Codex
 
 - Autenticação: `auth.json` em `CODEX_HOME` (padrão `~/.codex`), somente leitura. Lê `tokens.access_token` e `tokens.account_id`, além de e-mail e plano no `id_token`. Esses valores são decodificados sem verificação de assinatura e servem apenas para exibição.
-- Login por chave de API: `unsupported`, porque não há janelas de plano.
+- Login por chave de API (`auth_mode: apikey` declarado, ou só `OPENAI_API_KEY`): `unsupported`, porque não há janelas de plano. O modo declarado prevalece sobre campos OAuth remanescentes. Sem `auth.json` e com `cli_auth_credentials_store = "keyring"` ou `"auto"` em `config.toml`: `credentialsUnavailable`, porque o app não lê o armazenamento do sistema. A sessão é identificada por `account_id` e pelo `sub` do `id_token`.
 - Token expirado (`exp` do JWT): não é enviado. O Codex o renova na próxima execução.
 - Fonte principal: `GET https://chatgpt.com/backend-api/wham/usage` com `Authorization` e `ChatGPT-Account-Id`. Lê `rate_limit.primary_window` e `secondary_window` (`used_percent` de 0 a 100, `limit_window_seconds`, `reset_at` em epoch ou `reset_after_seconds`), `code_review_rate_limit`, `additional_rate_limits[]` e `spend_control.individual_limit`.
-- Fallback: o registro `token_count` com `rate_limits` mais recente que o próprio Codex grava em `sessions/AAAA/MM/DD/rollout-*.jsonl`. São lidos os últimos 512 KiB dos 6 arquivos mais novos, com idade máxima de 8 dias. Essa leitura sempre aparece como `stale` com origem `sessionLog`.
+- Fallback: o registro `token_count` com `rate_limits` mais recente que o próprio Codex grava em `sessions/AAAA/MM/DD/rollout-*.jsonl`. São lidos os últimos 512 KiB dos 6 arquivos mais novos, com idade máxima de 8 dias, só em pastas numéricas, com no máximo 10 dias visitados e dentro de um orçamento cumulativo. Essa leitura sempre aparece como `stale`, com origem `sessionLog` e sem conta associada. Só janelas do `rate_limit` principal podem virar o indicador; revisão de código, limites adicionais e créditos são listados. Uma resposta só com créditos é `malformed`.
 
 ### Claude Code
 
 - Autenticação: `.credentials.json` em `CLAUDE_CONFIG_DIR` (padrão `~/.claude`), chave `claudeAiOauth`, somente leitura. O e-mail vem de `oauthAccount.emailAddress` em `.claude.json`.
-- Token vazio ou ausente: `authMissing`. Expirado (`expiresAt`, em ms): `authExpired`. Sem o escopo `user:profile` (token só de inferência): `unsupported`. Login por chave de API (`primaryApiKey`, só a presença): `unsupported`, porque custos de API não têm fonte local.
+- Sem arquivo de credencial ou com token vazio: `authMissing` e sessão encerrada quando o perfil não tem conta; `credentialsUnavailable` quando o perfil ainda tem conta, pois o Claude Desktop pode fornecer a credencial. Arquivo ilegível, grande demais ou inválido: `credentialsInvalid`. Expirado (`expiresAt`, em ms): `authExpired`. Escopos declarados sem `user:profile` (token só de inferência): `unsupported`. Escopos ausentes: a consulta é tentada, e uma recusa vira `authRejected`. Login por chave de API (`primaryApiKey`, só a presença): `unsupported`. A sessão é identificada por `accountUuid` e `organizationUuid` do perfil.
 - Fonte: `GET https://api.anthropic.com/api/oauth/usage` com `anthropic-beta: oauth-2025-04-20`. Lê os objetos com `utilization` (0 a 100) e `resets_at`: `five_hour`, `seven_day`, `seven_day_opus`, `seven_day_sonnet`, `seven_day_oauth_apps` e chaves novas no mesmo formato. `extra_usage` habilitado vira cota `credits`.
-- Atividade local: soma `input_tokens + cache_creation_input_tokens + output_tokens` das mensagens do assistente gravadas nas transcrições de `projects/*/*.jsonl` nas últimas 5 h. Conta cada `message.id` uma vez e exclui leituras de cache. Só arquivos modificados no período são lidos, até 8 MiB do final de cada um.
+- Atividade local: soma `input_tokens + cache_creation_input_tokens + output_tokens` das mensagens do assistente gravadas nas transcrições de `projects/*/*.jsonl` nas últimas 5 h, lidas depois da consulta de cotas e só com sessão. Cada `message.id` fica com o maior total observado, porque registros de streaming crescem. Leituras de cache são excluídas. O orçamento é de 20 mil entradas, 256 arquivos, 64 MiB, 200 mil registros e 2 s, com até 8 MiB do final de cada arquivo. Ao atingir um limite, o resultado fica marcado como parcial. Só chaves conhecidas viram o indicador; chaves novas das famílias `five_hour_*` e `seven_day_*` são listadas, e as demais são ignoradas.
 - O adaptador não executa o CLI, não renova tokens, não instala hooks e não altera configurações. Ele só lê arquivos, com o modo de compartilhamento padrão do Windows, então o Remote Control e as sessões em execução não são afetados.
 
 ### Riscos de compatibilidade
@@ -90,22 +111,33 @@ Os dois endpoints são **internos e não documentados**. Eles são os mesmos que
 
 Há um worker por provedor (`usage/mod.rs`) e a política fica em `usage/scheduler.rs`, que é lógica pura com relógio injetado:
 
-| Regra                         | Valor                                                                                                                           |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| Intervalo regular             | 5 min, com a primeira consulta na inicialização.                                                                                |
-| Atualização manual            | Bandeja ("Atualizar agora") ou clique no indicador. Intervalo mínimo de 20 s.                                                   |
-| Concorrência                  | No máximo uma consulta por provedor. O IPC lê apenas o cache.                                                                   |
-| Falha de rede, timeout, 5xx   | Backoff de 1, 2, 4, 8, 16 e no máximo 30 min.                                                                                   |
-| HTTP 429                      | Espera `max(Retry-After, backoff, 60 s)`, que vale também para a atualização manual. `Retry-After` aceita segundos e data HTTP. |
-| 401/403 e resposta malformada | Espera `max(backoff, 5 min)`.                                                                                                   |
-| Login ausente ou expirado     | Nova verificação local a cada 2 min, sem rede.                                                                                  |
-| Desatualizado                 | Leitura com mais de 15 min, ou última tentativa falhou com leitura anterior válida.                                             |
-| Janela renovada               | Uma janela armazenada cujo `resets_at` passou é exibida com 0% e renovação desconhecida.                                        |
+Esperas locais usam o relógio monotônico. UTC fica para datas dos provedores, `Retry-After` em data HTTP e apresentação. Há três barreiras separadas: a próxima atualização regular, a primeira atualização manual permitida e a espera imposta pelo servidor.
+
+| Situação                             | Atualização regular                       | Atualização manual                                    |
+| ------------------------------------ | ----------------------------------------- | ----------------------------------------------------- |
+| Sucesso                              | 5 min                                     | após 20 s                                             |
+| Rede ou timeout                      | backoff de 1, 2, 4, 8, 16 e até 30 min    | após 20 s (a requisição não teve resposta)            |
+| HTTP 429                             | `max(Retry-After, backoff, 60 s)`         | a mesma espera, imposta pelo servidor                 |
+| HTTP 5xx ou outro, com `Retry-After` | `max(Retry-After, backoff)`               | a mesma espera, imposta pelo servidor                 |
+| HTTP 5xx ou outro, sem `Retry-After` | backoff                                   | após o backoff                                        |
+| 401/403                              | `max(backoff, 5 min)`                     | a mesma espera, ou antes, se a credencial local mudar |
+| Resposta malformada                  | `max(backoff, 5 min)`                     | após o backoff                                        |
+| Login ausente, expirado ou ilegível  | nova verificação local em 2 min, sem rede | após 20 s; imediata se a sessão local mudar           |
+
+`Retry-After` aceita segundos e data HTTP. Valores válidos acima do teto de backoff são respeitados. Valores acima de 24 h são limitados a 24 h, para que um cabeçalho defeituoso não paralise o provedor indefinidamente. Esse prazo vive só em memória: reiniciar o app ou trocar de conta o libera.
+
+A cada despertar, o worker sonda a sessão nos arquivos locais, sem rede. Logout e troca de conta comprovados descartam cotas, rótulos e estado de retry da conta anterior. Uma credencial renovada da mesma conta mantém os dados e libera a espera local da credencial recusada. Uma cota só é exibida enquanto a sessão atual for a mesma conta que a produziu. Registros locais do Codex aparecem como histórico sem conta verificada. Uma leitura da API sem identidade verificável só vale enquanto é o resultado da última tentativa.
+
+Uma janela cujo `resets_at` passou fica marcada `renewed`: não é leitura e cede a posição principal a qualquer janela medida. Se todas renovaram, a barra mostra "—" como dado desatualizado. O worker também desperta nas renovações e quando a leitura envelhece, e publica essas transições mesmo sem resposta da rede.
+
+Um pânico dentro do adaptador encerra a tentativa como `malformed`, sem derrubar o worker. Os mutexes recuperam o estado após envenenamento, e `refreshing` termina em todo caminho.
 
 Cada mudança de estado emite `usage-updated` para a barra e republica o resumo aberto.
 
 ## Segurança e empacotamento
 
-O Vite gera duas páginas estáticas, que o Tauri serve pelo protocolo interno do WebView2, sem servidor HTTP local. A CSP parte de `default-src 'none'` e só libera a própria origem e o IPC. Cada janela navega apenas para a própria página. `withGlobalTauri` continua desativado. As capabilities separam `rail` (`get-usage`, `refresh-usage`, `get-rail-placement`, `rail-pointer`, `set-rail-motion`) de `summary` (`summary-ready`, `show-summary`).
+O Vite gera três páginas estáticas, que o Tauri serve pelo protocolo interno do WebView2, sem servidor HTTP local. A CSP parte de `default-src 'none'` e só libera a própria origem e o IPC. Cada janela navega apenas para a própria página. `withGlobalTauri` continua desativado. As capabilities separam `rail` (`get-usage`, `refresh-usage`, `get-rail-placement`, `rail-pointer`, `set-rail-motion`, escuta de eventos), `summary` (`summary-ready`, `show-summary`, escuta de eventos) e `settings` (`get-settings`, `set-preferences`, `get-claude-diagnostics`, sem eventos). O teste `ipc_tests` em `main.rs` roda o ACL real e prova que cada janela só alcança os próprios comandos. Uma janela desconhecida não alcança nenhum, e nenhuma recebe plugins de janela, webview, path ou emissão de eventos.
+
+Os rótulos enviados ao WebView são limitados a 48 caracteres, sem caracteres de controle. Arquivos de credenciais, perfis e configurações têm tamanho máximo. As transcrições e os rollouts são lidos dentro de um orçamento cumulativo de entradas, arquivos, bytes, registros e tempo.
 
 As credenciais são lidas no Rust a cada consulta, usadas só no cabeçalho `Authorization` e descartadas. Elas nunca são gravadas, copiadas, registradas em log ou enviadas ao WebView. O app não executa processos externos. [Capabilities do Tauri](https://v2.tauri.app/security/capabilities/)
