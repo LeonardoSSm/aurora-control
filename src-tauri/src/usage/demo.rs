@@ -1,52 +1,129 @@
-use super::UsageAdapter;
-use super::model::{ConsumptionWindow, Provider, Reading, Snapshot, Source, Usage};
+//! Fictitious readings for tests and visual validation. Enabled with
+//! `AURORA_DEMO=1`, or `AURORA_DEMO=<codex>,<claude>` to choose the primary
+//! percentages. Never touches the network or provider files.
 
-pub struct DemoAdapter;
+use chrono::{DateTime, TimeDelta, Utc};
 
-impl UsageAdapter for DemoAdapter {
-    fn snapshot(&self) -> Snapshot {
-        [
-            (Provider::Codex, 64, "2026-11-23T20:00:00Z"),
-            (Provider::ClaudeCode, 37, "2026-11-23T21:00:00Z"),
-        ]
-        .into_iter()
-        .map(|(provider, percent_used, resets_at)| Usage {
+use super::adapter::{Fetched, Outcome, UsageAdapter, rfc3339};
+use super::model::{LocalActivity, Origin, Provider, Quota, QuotaKind, Source};
+
+pub struct DemoAdapter {
+    provider: Provider,
+    percent: u8,
+}
+
+impl DemoAdapter {
+    pub fn new(provider: Provider, percent: u8) -> Self {
+        Self {
             provider,
-            account: Some("Conta de exemplo".into()),
-            source: Source::Demo,
-            reading: Reading::Available { percent_used },
-            window: Some(ConsumptionWindow {
-                duration_minutes: 300,
-                resets_at: Some(resets_at.into()),
-            }),
-            updated_at: Some("2026-11-23T17:00:00Z".into()),
-        })
-        .collect()
+            percent: percent.min(100),
+        }
+    }
+
+    /// Parses `AURORA_DEMO`. Returns `None` when demo mode is off.
+    pub fn from_env(value: Option<&str>) -> Option<[Self; 2]> {
+        let value = value?.trim();
+        if value.is_empty() || value == "0" {
+            return None;
+        }
+        let mut numbers = value.split(',').map(|part| part.trim().parse::<u8>().ok());
+        let codex = numbers
+            .next()
+            .flatten()
+            .filter(|_| value != "1")
+            .unwrap_or(64);
+        let claude = numbers.next().flatten().unwrap_or(37);
+        Some([
+            Self::new(Provider::Codex, codex),
+            Self::new(Provider::ClaudeCode, claude),
+        ])
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
+fn window(
+    id: &str,
+    label: &str,
+    percent_used: u8,
+    minutes: u32,
+    resets_at: DateTime<Utc>,
+) -> Quota {
+    Quota {
+        id: id.into(),
+        label: label.into(),
+        kind: QuotaKind::Window,
+        percent_used,
+        duration_minutes: Some(minutes),
+        resets_at: Some(rfc3339(resets_at)),
+    }
+}
 
-    #[test]
-    fn demo_serializes_the_wire_contract() {
-        let snapshot = serde_json::to_value(DemoAdapter.snapshot()).unwrap();
-        assert_eq!(
-            snapshot[0],
-            json!({
-                "provider": "codex",
-                "account": "Conta de exemplo",
-                "source": "demo",
-                "status": "available",
-                "percentUsed": 64,
-                "window": { "durationMinutes": 300, "resetsAt": "2026-11-23T20:00:00Z" },
-                "updatedAt": "2026-11-23T17:00:00Z"
-            })
-        );
-        assert_eq!(snapshot[1]["provider"], "claudeCode");
-        assert_eq!(snapshot[1]["source"], "demo");
-        assert_eq!(snapshot[1]["percentUsed"], 37);
+impl UsageAdapter for DemoAdapter {
+    fn provider(&self) -> Provider {
+        self.provider
+    }
+
+    fn source(&self) -> Source {
+        Source::Demo
+    }
+
+    fn fetch(&self, now: DateTime<Utc>) -> Outcome {
+        let hour = TimeDelta::hours(1);
+        let secondary = self.percent / 2;
+        let quotas = match self.provider {
+            Provider::Codex => vec![
+                window(
+                    "codex-primary",
+                    "Janela de 5 h",
+                    self.percent,
+                    300,
+                    now + hour * 3,
+                ),
+                window(
+                    "codex-secondary",
+                    "Semanal",
+                    secondary,
+                    10_080,
+                    now + hour * 70,
+                ),
+            ],
+            Provider::ClaudeCode => vec![
+                window(
+                    "fiveHour",
+                    "Sessão de 5 h",
+                    self.percent,
+                    300,
+                    now + hour * 2,
+                ),
+                window(
+                    "sevenDay",
+                    "Semanal · todos os modelos",
+                    secondary,
+                    10_080,
+                    now + hour * 90,
+                ),
+                window(
+                    "sevenDayOpus",
+                    "Semanal · Opus",
+                    secondary / 2,
+                    10_080,
+                    now + hour * 90,
+                ),
+            ],
+        };
+        Outcome {
+            result: Some(Ok(Fetched {
+                account: Some("Conta de exemplo".into()),
+                plan: None,
+                origin: Origin::Fixture,
+                quotas,
+                observed_at: now,
+            })),
+            activity: (self.provider == Provider::ClaudeCode).then_some(LocalActivity {
+                window_minutes: 300,
+                tokens: 184_250,
+                sessions: 2,
+            }),
+            ..Outcome::default()
+        }
     }
 }
