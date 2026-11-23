@@ -1,8 +1,9 @@
+import type { Side } from "../desktop/railGeometry";
 import { providerNames } from "../usage/model";
 import type { Usage } from "../usage/model";
 import { formatDuration, formatTime, meter } from "../usage/presentation";
 
-export function UsageSummary({ usage }: { usage: Usage }) {
+export function UsageSummary({ usage, side }: { usage: Usage; side: Side }) {
   const reading = meter(usage);
   const stateText = {
     available: "da cota utilizada",
@@ -14,6 +15,7 @@ export function UsageSummary({ usage }: { usage: Usage }) {
     <main
       className="summary h-screen select-none"
       data-provider={usage.provider}
+      data-side={side}
     >
       <header className="summary-header flex items-start justify-between gap-2">
         <div className="min-w-0">

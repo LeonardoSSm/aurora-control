@@ -5,11 +5,10 @@
   font-family: "Segoe UI Variable", "Segoe UI", sans-serif;
   background: transparent;
   color: #edf3f9;
-  --rail: #121823;
-  --card: #141c28;
-  --seam: #334054;
+  --card: #101822;
+  --seam: #2a3949;
   --muted: #abb9cb;
-  --track: #344156;
+  --track: #334352;
   --codex: #6be3bc;
   --claude: #ffaf85;
 }
@@ -29,80 +28,105 @@ body {
 
 .rail {
   display: grid;
-  grid-template-rows: 32px 83px 83px;
-  justify-items: center;
-  background: var(--rail);
-  border-radius: 18px;
-  box-shadow: inset 0 0 0 1px var(--seam);
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  height: 100vh;
 }
 
-.rail-header {
+.indicator svg {
+  display: block;
   width: 100%;
+  height: 100%;
+  overflow: hidden;
+  pointer-events: none;
 }
 
-.rail-badge {
-  color: #c3d0e3;
-  background: #243145;
-  border-radius: 4px;
-  padding: 1px 5px 2px;
-  font-size: 9px;
-  line-height: 1.2;
-  font-weight: 700;
-  letter-spacing: 0.13em;
-  text-transform: uppercase;
+.ring-glow {
+  stop-color: color-mix(in srgb, var(--accent) 9%, #15202e);
 }
 
-.indicator {
-  align-self: start;
-  gap: 3px;
+.ring-base {
+  stop-color: #0c141f;
 }
 
-.usage-ring {
-  width: 60px;
-  height: 60px;
-  border-radius: 50%;
-  background: #1b2534;
-  border: 1px solid transparent;
-  background-clip: content-box;
-}
-
-.indicator:hover .usage-ring {
-  background-color: #29364a;
+.ring-surface {
+  stroke: var(--seam);
+  stroke-width: 1;
 }
 
 .ring-track,
 .ring-progress {
   fill: none;
-  stroke-width: 3;
+  stroke-width: 2.2;
+  stroke-linecap: round;
 }
 .ring-track {
   stroke: var(--track);
 }
 .ring-progress {
   stroke: var(--accent);
-  stroke-linecap: round;
+}
+
+.indicator text {
+  text-anchor: middle;
+  dominant-baseline: central;
 }
 
 .ring-value {
-  font-size: 17px;
-  font-weight: 650;
+  fill: #eff6fd;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
 }
 .ring-value[data-status="stale"] {
-  color: var(--muted);
+  fill: var(--muted);
 }
 .provider-name {
-  color: #c8d3e1;
-  font-size: 11px;
+  fill: #c5d2df;
   font-weight: 600;
 }
 
+.ring-badge {
+  fill: #a2b3c6;
+  font-size: 6.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
 .summary {
-  background: var(--card);
+  background: radial-gradient(
+    ellipse at top,
+    color-mix(in srgb, var(--accent) 7%, var(--card)),
+    var(--card) 72%
+  );
   border: 1px solid var(--seam);
   border-radius: 15px;
   padding: 12px 14px 10px;
   font-size: 11px;
   color: var(--muted);
+  animation: reveal-summary 180ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  --summary-offset: -8px;
+}
+
+.summary[data-side="right"] {
+  --summary-offset: 8px;
+}
+
+@keyframes reveal-summary {
+  from {
+    opacity: 0;
+    transform: translateX(var(--summary-offset));
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .summary {
+    animation: none;
+  }
 }
 
 .summary-title {

@@ -16,6 +16,8 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             usage::get_usage,
+            windows::get_rail_placement,
+            windows::set_rail_expansion,
             windows::set_hover,
             windows::summary_ready,
             windows::show_summary,

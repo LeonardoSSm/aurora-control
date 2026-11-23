@@ -4,8 +4,8 @@ Barra de utilização para Windows 11 com indicadores de Codex e Claude Code. A 
 
 ## Uso
 
-1. Abra `aurora-control.exe`. A barra inicia na lateral direita da área útil do monitor principal.
-2. Passe o ponteiro sobre um indicador para ver a conta, a janela de consumo, a renovação e a última atualização. O resumo abre para dentro da tela.
+1. Abra `aurora-control.exe`. Os semicírculos de Codex e Claude Code ficam presos à lateral direita da área útil do monitor principal.
+2. Passe o ponteiro sobre um indicador para expandi-lo e ver a conta, a janela de consumo, a renovação e a última atualização. O resumo abre para dentro da tela.
 3. Clique no ícone da bandeja para mostrar ou ocultar a barra. O menu de contexto permite escolher uma lateral ou encerrar o app. Se o ícone estiver recolhido, abra a área de ícones ocultos da bandeja.
 
 A lateral escolhida vale durante a execução. Cada nova execução começa na direita.

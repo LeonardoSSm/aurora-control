@@ -1,16 +1,20 @@
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+use serde::Serialize;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Side {
     Left,
     Right,
 }
 
-pub const RAIL_WIDTH: i32 = 96;
-pub const RAIL_HEIGHT: i32 = 210;
-// Matches the visual border radius of .rail in styles.css.
-const RAIL_CORNER_RADIUS: i32 = 18;
+// The SVG uses the same logical dimensions in src/desktop/railGeometry.ts.
+pub const RAIL_WIDTH: i32 = 64;
+pub const INDICATOR_DIAMETER: i32 = 76;
+pub const INDICATOR_STEP: i32 = INDICATOR_DIAMETER + 12;
+pub const RAIL_HEIGHT: i32 = INDICATOR_STEP + INDICATOR_DIAMETER;
+pub const COLLAPSED_WIDTH: u8 = (INDICATOR_DIAMETER / 2) as u8;
 pub const SUMMARY_WIDTH: i32 = 274;
 pub const SUMMARY_HEIGHT: i32 = 192;
-const SCREEN_MARGIN: i32 = 10;
 const SUMMARY_GAP: i32 = 8;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -23,8 +27,29 @@ pub struct Rect {
 
 pub struct Layout {
     pub rail: Rect,
-    pub rail_corner_diameter: i32,
     pub summary: Rect,
+    side: Side,
+    scale: f64,
+}
+
+impl Layout {
+    pub fn indicator_ellipses(&self, widths: [u8; 2]) -> [Rect; 2] {
+        let edge = match self.side {
+            Side::Left => 0,
+            Side::Right => self.rail.width,
+        };
+
+        std::array::from_fn(|index| {
+            let extent = pixels(i32::from(widths[index]), self.scale);
+            let top = index as i32 * INDICATOR_STEP;
+            Rect {
+                x: edge - extent,
+                y: pixels(top, self.scale),
+                width: 2 * extent,
+                height: pixels(top + INDICATOR_DIAMETER, self.scale) - pixels(top, self.scale),
+            }
+        })
+    }
 }
 
 fn pixels(logical: i32, scale: f64) -> i32 {
@@ -35,12 +60,11 @@ fn pixels(logical: i32, scale: f64) -> i32 {
 pub fn layout(work: Rect, scale: f64, side: Side, anchor: i32) -> Layout {
     let rail_width = pixels(RAIL_WIDTH, scale).min(work.width);
     let rail_height = pixels(RAIL_HEIGHT, scale).min(work.height);
-    let margin = pixels(SCREEN_MARGIN, scale).min(work.width - rail_width);
     let right = work.x + work.width;
     let rail = Rect {
         x: match side {
-            Side::Left => work.x + margin,
-            Side::Right => right - margin - rail_width,
+            Side::Left => work.x,
+            Side::Right => right - rail_width,
         },
         y: work.y + (work.height - rail_height) / 2,
         width: rail_width,
@@ -65,13 +89,11 @@ pub fn layout(work: Rect, scale: f64, side: Side, anchor: i32) -> Layout {
         width,
         height,
     };
-    let rail_corner_diameter = pixels(2 * RAIL_CORNER_RADIUS, scale)
-        .min(rail_width)
-        .min(rail_height);
     Layout {
         rail,
-        rail_corner_diameter,
         summary,
+        side,
+        scale,
     }
 }
 
@@ -88,22 +110,21 @@ mod tests {
 
     #[test]
     fn right_is_centered_in_work_area_and_summary_opens_to_the_left() {
-        let result = layout(WORK, 1.0, Side::Right, 62);
-        assert_eq!(result.rail_corner_diameter, 36);
+        let result = layout(WORK, 1.0, Side::Right, 38);
         assert_eq!(
             result.rail,
             Rect {
-                x: 1814,
-                y: 415,
-                width: 96,
-                height: 210
+                x: 1856,
+                y: 438,
+                width: 64,
+                height: 164
             }
         );
         assert_eq!(
             result.summary,
             Rect {
-                x: 1532,
-                y: 381,
+                x: 1574,
+                y: 380,
                 width: 274,
                 height: 192
             }
@@ -118,22 +139,21 @@ mod tests {
             width: 1600,
             height: 1000,
         };
-        let result = layout(work, 1.25, Side::Left, 145);
-        assert_eq!(result.rail_corner_diameter, 45);
+        let result = layout(work, 1.25, Side::Left, 126);
         assert_eq!(
             result.rail,
             Rect {
-                x: -1587,
-                y: 416,
-                width: 120,
-                height: 263
+                x: -1600,
+                y: 445,
+                width: 80,
+                height: 205
             }
         );
         assert_eq!(
             result.summary,
             Rect {
-                x: -1457,
-                y: 477,
+                x: -1510,
+                y: 483,
                 width: 343,
                 height: 240
             }
@@ -148,18 +168,32 @@ mod tests {
             width: 240,
             height: 120,
         };
-        let result = layout(work, 1.0, Side::Right, 145);
+        let result = layout(work, 1.0, Side::Right, 126);
         assert_eq!(result.rail.y, 40);
         assert_eq!(
             result.summary,
             Rect {
                 x: 0,
                 y: 40,
-                width: 126,
+                width: 168,
                 height: 120
             }
         );
-        let result = layout(Rect { width: 80, ..work }, 1.0, Side::Left, 62);
+        let result = layout(Rect { width: 64, ..work }, 1.0, Side::Left, 38);
         assert_eq!(result.summary.width, 0);
+    }
+
+    #[test]
+    fn indicators_remain_at_the_edge_with_independent_widths_and_a_gap() {
+        let widths = [COLLAPSED_WIDTH, RAIL_WIDTH as u8];
+        let right = layout(WORK, 1.0, Side::Right, 38).indicator_ellipses(widths);
+        let left = layout(WORK, 1.0, Side::Left, 38).indicator_ellipses(widths);
+        assert_eq!(right[0].x, 26);
+        assert_eq!(left[0].x, -38);
+        assert_eq!(right[0].width, 76);
+        assert_eq!(right[1].x, 0);
+        assert_eq!(left[1].x, -64);
+        assert_eq!(left[1].width, 128);
+        assert_eq!(right[1].y - right[0].height, 12);
     }
 }

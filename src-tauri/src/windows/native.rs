@@ -2,7 +2,10 @@ use std::io;
 use tauri::WebviewWindow;
 use windows_sys::Win32::{
     Foundation::{HWND, SetLastError},
-    Graphics::Gdi::{CreateRoundRectRgn, DeleteObject, SetWindowRgn},
+    Graphics::Gdi::{
+        CombineRgn, CreateEllipticRgn, CreateRectRgn, DeleteObject, HRGN, RGN_AND, RGN_OR,
+        SetWindowRgn,
+    },
     UI::WindowsAndMessaging::{
         GWL_EXSTYLE, GetWindowLongPtrW, HWND_TOPMOST, IsWindowVisible, SWP_HIDEWINDOW,
         SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
@@ -37,30 +40,47 @@ pub(super) fn is_visible(window: &WebviewWindow) -> tauri::Result<bool> {
     Ok(unsafe { IsWindowVisible(hwnd(window)?) } != 0)
 }
 
-pub(super) fn set_rounded_region(
+struct Region(HRGN);
+
+impl Region {
+    fn new(handle: HRGN) -> io::Result<Self> {
+        if handle.is_null() {
+            return Err(io::Error::other(
+                "Could not allocate the rail window region",
+            ));
+        }
+        Ok(Self(handle))
+    }
+}
+
+impl Drop for Region {
+    fn drop(&mut self) {
+        // SAFETY: This wrapper owns the region handle.
+        unsafe { DeleteObject(self.0) };
+    }
+}
+
+pub(super) fn set_indicator_regions(
     window: &WebviewWindow,
     rect: Rect,
-    corner_diameter: i32,
+    ellipses: [Rect; 2],
 ) -> tauri::Result<()> {
     let handle = hwnd(window)?;
-    // SAFETY: The live HWND belongs to Tauri. Windows takes ownership of the
-    // new region only if SetWindowRgn succeeds.
+    // SAFETY: Tauri owns the live HWND. GDI regions are owned by their wrappers
+    // until the result is transferred to Windows by SetWindowRgn.
     unsafe {
-        let region = CreateRoundRectRgn(
-            0,
-            0,
-            rect.width,
-            rect.height,
-            corner_diameter,
-            corner_diameter,
-        );
-        if region.is_null() {
-            return Err(io::Error::other("Could not allocate the rail window region").into());
-        }
-        if SetWindowRgn(handle, region, IsWindowVisible(handle)) == 0 {
-            DeleteObject(region);
+        let ellipse =
+            |r: Rect| Region::new(CreateEllipticRgn(r.x, r.y, r.x + r.width, r.y + r.height));
+        let first = ellipse(ellipses[0])?;
+        let second = ellipse(ellipses[1])?;
+        let area = Region::new(CreateRectRgn(0, 0, rect.width, rect.height))?;
+        if CombineRgn(first.0, first.0, second.0, RGN_OR) == 0
+            || CombineRgn(first.0, first.0, area.0, RGN_AND) == 0
+            || SetWindowRgn(handle, first.0, IsWindowVisible(handle)) == 0
+        {
             return Err(io::Error::other("Could not apply the rail window region").into());
         }
+        std::mem::forget(first);
     }
     Ok(())
 }

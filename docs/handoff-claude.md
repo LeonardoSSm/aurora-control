@@ -28,7 +28,7 @@ As credenciais potencialmente expostas são uma chave de API da OpenAI, uma chav
 - **OpenAI e Gemini.** Gerar novas chaves nos respectivos consoles, atualizar os serviços, verificar o funcionamento, revogar as chaves anteriores e revisar uso e cobrança desde a captura. [OpenAI](https://help.openai.com/en/articles/5112595-best-practices-for-api-key-safety), [Google Cloud](https://docs.cloud.google.com/docs/security/compromised-credentials)
 - **Pluggy.** Preparar a atualização dos serviços antes de gerar um novo `Client Secret`. A geração invalida o segredo atual imediatamente. As chaves de API já emitidas mantêm a validade até expirar. Revisar a atividade da aplicação desde a exposição. [Pluggy](https://docs.pluggy.ai/en/docs/security/credentials)
 
-## Validação no Windows 11
+## Validação anterior ao redesenho dos indicadores
 
 Teste do binário instalado no Windows 11 x64, build 26300, com área útil primária de 1920 × 1032 e escala de 100%. O Chrome usou um perfil descartável e uma página local com contador de cliques. As evidências vieram das APIs Win32 e da acessibilidade da bandeja, sem novas imagens.
 
@@ -42,3 +42,7 @@ Teste do binário instalado no Windows 11 x64, build 26300, com área útil prim
 | NSIS                  | Instalação silenciosa em diretório temporário retornou código 0 e registrou a versão 0.1.0. O executável instalado abriu a barra. A desinstalação retornou código 0 e removeu o registro e o executável de teste.                                                                                                                                       |
 
 Os comandos `npm run format:check`, `npm run lint`, `npm test`, `cargo fmt --check`, `cargo clippy --locked --offline --all-targets -- -D warnings`, `cargo test --locked --offline` e `npm run desktop:build` passaram. Foram cinco testes de interface e seis testes Rust. O instalador foi testado na conta Windows atual, com diretório de instalação e perfil WebView2 de teste. A disponibilidade do Windows Sandbox não pôde ser confirmada sem privilégios de administrador. A escala fracionária foi coberta no teste de geometria. Ainda falta repetir a medição interativa com escala acima de 100%.
+
+## Validação após o redesenho
+
+No Windows 11, com o Chrome maximizado, o executável recolheu e expandiu cada indicador independentemente nos dois lados. O resumo abriu para dentro da área útil, o Chrome manteve o foco e recebeu os cliques fora dos semicírculos. A troca de lado pelo menu nativo e o encerramento passaram. A suíte atual tem seis testes de interface e sete testes Rust.

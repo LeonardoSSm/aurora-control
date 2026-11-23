@@ -1,13 +1,14 @@
 import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Rail } from "./components/Rail";
-import { getUsage, setHover } from "./desktop/commands";
-import type { Provider } from "./usage/model";
+import { getUsage } from "./desktop/commands";
+import { useRailMotion } from "./desktop/useRailMotion";
 import type { RailState } from "./usage/presentation";
 import "./styles.css";
 
 function App() {
   const [state, setState] = useState<RailState>({ status: "loading" });
+  const { frame, onHover } = useRailMotion();
 
   useEffect(() => {
     void getUsage().then(
@@ -19,11 +20,15 @@ function App() {
     );
   }, []);
 
-  function handleHover(provider: Provider | null) {
-    void setHover(provider).catch(console.error);
-  }
-
-  return <Rail state={state} onHover={handleHover} />;
+  if (!frame) return null;
+  return (
+    <Rail
+      state={state}
+      side={frame.placement.side}
+      widths={frame.widths}
+      onHover={onHover}
+    />
+  );
 }
 
 createRoot(document.getElementById("root")!).render(<App />);

@@ -10,9 +10,11 @@ import "./styles.css";
 
 const root = createRoot(document.getElementById("root")!);
 
-void onSummarySelection(({ usage, revision }) => {
+void onSummarySelection(({ usage, revision, side }) => {
   // Commit the card before asking Windows to reveal it, including on the first hover.
-  flushSync(() => root.render(<UsageSummary usage={usage} />));
+  flushSync(() =>
+    root.render(<UsageSummary key={revision} usage={usage} side={side} />),
+  );
   void showSummary(revision).catch(console.error);
 })
   .then(() => summaryReady())
