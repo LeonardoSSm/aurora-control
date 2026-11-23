@@ -121,7 +121,9 @@ fn current_layout(rail: &WebviewWindow, side: Side, anchor: i32) -> tauri::Resul
 }
 
 fn place_rail(rail: &WebviewWindow, side: Side, show: bool) -> tauri::Result<()> {
-    native::place(rail, current_layout(rail, side, 0)?.rail, show)
+    let layout = current_layout(rail, side, 0)?;
+    native::set_rounded_region(rail, layout.rail, layout.rail_corner_diameter)?;
+    native::place(rail, layout.rail, show)
 }
 
 fn hide_summary(app: &AppHandle) -> tauri::Result<()> {

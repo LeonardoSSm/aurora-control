@@ -2,6 +2,7 @@ use std::io;
 use tauri::WebviewWindow;
 use windows_sys::Win32::{
     Foundation::{HWND, SetLastError},
+    Graphics::Gdi::{CreateRoundRectRgn, DeleteObject, SetWindowRgn},
     UI::WindowsAndMessaging::{
         GWL_EXSTYLE, GetWindowLongPtrW, HWND_TOPMOST, IsWindowVisible, SWP_HIDEWINDOW,
         SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
@@ -34,6 +35,34 @@ pub(super) fn prevent_activation(window: &WebviewWindow) -> tauri::Result<()> {
 pub(super) fn is_visible(window: &WebviewWindow) -> tauri::Result<bool> {
     // SAFETY: The HWND was obtained from the live window owned by Tauri.
     Ok(unsafe { IsWindowVisible(hwnd(window)?) } != 0)
+}
+
+pub(super) fn set_rounded_region(
+    window: &WebviewWindow,
+    rect: Rect,
+    corner_diameter: i32,
+) -> tauri::Result<()> {
+    let handle = hwnd(window)?;
+    // SAFETY: The live HWND belongs to Tauri. Windows takes ownership of the
+    // new region only if SetWindowRgn succeeds.
+    unsafe {
+        let region = CreateRoundRectRgn(
+            0,
+            0,
+            rect.width,
+            rect.height,
+            corner_diameter,
+            corner_diameter,
+        );
+        if region.is_null() {
+            return Err(io::Error::other("Could not allocate the rail window region").into());
+        }
+        if SetWindowRgn(handle, region, IsWindowVisible(handle)) == 0 {
+            DeleteObject(region);
+            return Err(io::Error::other("Could not apply the rail window region").into());
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn place(window: &WebviewWindow, rect: Rect, show: bool) -> tauri::Result<()> {

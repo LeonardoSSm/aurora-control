@@ -6,6 +6,8 @@ pub enum Side {
 
 pub const RAIL_WIDTH: i32 = 96;
 pub const RAIL_HEIGHT: i32 = 210;
+// Matches the visual border radius of .rail in styles.css.
+const RAIL_CORNER_RADIUS: i32 = 18;
 pub const SUMMARY_WIDTH: i32 = 274;
 pub const SUMMARY_HEIGHT: i32 = 192;
 const SCREEN_MARGIN: i32 = 10;
@@ -21,6 +23,7 @@ pub struct Rect {
 
 pub struct Layout {
     pub rail: Rect,
+    pub rail_corner_diameter: i32,
     pub summary: Rect,
 }
 
@@ -62,7 +65,14 @@ pub fn layout(work: Rect, scale: f64, side: Side, anchor: i32) -> Layout {
         width,
         height,
     };
-    Layout { rail, summary }
+    let rail_corner_diameter = pixels(2 * RAIL_CORNER_RADIUS, scale)
+        .min(rail_width)
+        .min(rail_height);
+    Layout {
+        rail,
+        rail_corner_diameter,
+        summary,
+    }
 }
 
 #[cfg(test)]
@@ -79,6 +89,7 @@ mod tests {
     #[test]
     fn right_is_centered_in_work_area_and_summary_opens_to_the_left() {
         let result = layout(WORK, 1.0, Side::Right, 62);
+        assert_eq!(result.rail_corner_diameter, 36);
         assert_eq!(
             result.rail,
             Rect {
@@ -108,6 +119,7 @@ mod tests {
             height: 1000,
         };
         let result = layout(work, 1.25, Side::Left, 145);
+        assert_eq!(result.rail_corner_diameter, 45);
         assert_eq!(
             result.rail,
             Rect {
