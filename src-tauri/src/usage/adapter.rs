@@ -52,6 +52,9 @@ pub enum FetchError {
     /// The sign-in is known locally, but there is no quota source this app
     /// may query. Decided without contacting the provider.
     SourceBlocked(BlockReason),
+    /// The provider's own client has not written a current, attributable
+    /// record yet. Decided from local files only.
+    AwaitingClient,
 }
 
 /// Everything an adapter learned during one attempt.
@@ -104,6 +107,11 @@ pub trait UsageAdapter: Send + Sync + 'static {
     fn cancel(&self) {}
     /// The provider was enabled again: work may start.
     fn resume(&self) {}
+    /// The user re-enabled a source its safety breaker suspended, after
+    /// reading why. `Ok(true)` when a suspension was lifted.
+    fn reset_safety(&self) -> Result<bool, String> {
+        Ok(false)
+    }
     /// A sign-in diagnosis from local files only, for the settings window.
     fn diagnostics(&self, _now: DateTime<Utc>) -> Option<Vec<DiagnosticRow>> {
         None

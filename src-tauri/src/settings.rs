@@ -188,6 +188,19 @@ pub fn get_diagnostics(app: AppHandle, provider: Provider) -> Option<Diagnostics
     app.state::<Service>().diagnostics(provider)
 }
 
+/// Lifts the safety suspension of a CLI source. The settings window asks the
+/// user to confirm, with the cause, before calling it. Returns the updated
+/// diagnosis.
+#[tauri::command]
+pub fn reset_provider_safety(
+    app: AppHandle,
+    provider: Provider,
+) -> Result<Option<Diagnostics>, String> {
+    let service = app.state::<Service>();
+    service.reset_safety(provider)?;
+    Ok(service.diagnostics(provider))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

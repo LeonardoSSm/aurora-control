@@ -212,10 +212,15 @@ const unsupportedText: Record<Provider, string> = {
 };
 
 const blockedText: Record<BlockReason, string> = {
-  termsUnverified:
-    "Sessão detectada. O Grok Build só mostra a franquia dentro do próprio CLI (/usage), e a consulta direta fica desativada até a verificação dos termos de uso da xAI.",
   cliSafety:
-    "Consultas suspensas: o CLI executou uma rodada do modelo em vez de só informar a cota. Nada mais será executado até reiniciar o Aurora Control.",
+    "Consultas suspensas por segurança: o CLI executou (ou pode ter executado) uma rodada do modelo em vez de só informar a cota. Nada mais será executado até você reativar a fonte nas configurações.",
+};
+
+const awaitingText: Record<Provider, string> = {
+  codex: "Sem leitura recente do Codex.",
+  claudeCode: "Sem leitura recente do Claude Code.",
+  antigravity: "Sem leitura recente do Antigravity.",
+  grok: "Sem registro recente da franquia para a conta atual. Abra o Grok Build (ou use /usage nele) para atualizá-lo.",
 };
 
 /** Where the numbers came from, as the user should read it. */
@@ -227,6 +232,8 @@ export function originText(origin: Usage["origin"]) {
       return "CLI oficial, comando somente leitura";
     case "sessionLog":
       return "registro local do cliente";
+    case "clientLog":
+      return "registro local do cliente oficial (não é consulta em tempo real)";
     case "fixture":
       return "dados de demonstração";
     case null:
@@ -252,6 +259,8 @@ export function issueText(issue: Issue, provider: Provider, now: Date) {
       return unsupportedText[provider];
     case "sourceBlocked":
       return blockedText[issue.reason];
+    case "awaitingClient":
+      return awaitingText[provider];
     case "rateLimited":
       return issue.retryAt
         ? `Limite de consultas atingido. Nova tentativa ${formatMoment(issue.retryAt, now)}.`
@@ -284,12 +293,19 @@ export function connectionText(usage: Usage, now: Date) {
     case "demo":
       return ago ? `Demonstração · atualizado ${ago}` : "Demonstração";
     case "live":
+      // A client's own record is recent, but it is not a live connection.
+      if (usage.origin === "clientLog")
+        return ago
+          ? `Registro do cliente oficial · ${ago}`
+          : "Registro do cliente oficial";
       return ago ? `Conectado · atualizado ${ago}` : "Conectado";
     case "stale": {
       const from =
         usage.origin === "sessionLog"
           ? "registro local sem conta verificada"
-          : "última leitura";
+          : usage.origin === "clientLog"
+            ? "registro do cliente oficial"
+            : "última leitura";
       return ago ? `Desatualizado · ${from} ${ago}` : "Desatualizado";
     }
     case "offline":

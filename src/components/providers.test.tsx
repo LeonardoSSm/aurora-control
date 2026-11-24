@@ -71,7 +71,7 @@ describe("provider catalog", () => {
       codex: "Codex",
       claudeCode: "Claude Code",
       antigravity: "Antigravity",
-      grok: "Grok",
+      grok: "Grok / Cursor",
     });
     expect(maxIndicators).toBe(catalog.length);
     expect(
@@ -153,13 +153,9 @@ describe("states of the new providers", () => {
         now,
       ),
     ).toContain("rodada do modelo");
-    expect(
-      issueText(
-        { code: "sourceBlocked", reason: "termsUnverified" },
-        "grok",
-        now,
-      ),
-    ).toContain("termos de uso da xAI");
+    expect(issueText({ code: "awaitingClient" }, "grok", now)).toContain(
+      "Abra o Grok Build",
+    );
     expect(issueText({ code: "unsupported" }, "antigravity", now)).toContain(
       "não tem cota de conta",
     );
@@ -175,17 +171,17 @@ describe("states of the new providers", () => {
   });
 
   it("flags attention independently of the provider's colors", () => {
-    const blocked: Usage = {
+    const waiting: Usage = {
       ...usage("grok", 0),
       status: "unavailable",
       window: null,
-      issue: { code: "sourceBlocked", reason: "termsUnverified" },
+      issue: { code: "awaitingClient" },
     };
-    expect(attention(blocked)).toBe("blocked");
+    expect(attention(waiting)).toBe("waiting");
     // A suspended CLI is a problem to look at, not a design choice.
     expect(
       attention({
-        ...blocked,
+        ...waiting,
         provider: "antigravity",
         issue: { code: "sourceBlocked", reason: "cliSafety" },
       }),
@@ -201,7 +197,7 @@ describe("states of the new providers", () => {
     expect(attention({ ...usage("grok", 40), source: "demo" })).toBeNull();
     const markup = renderToStaticMarkup(
       <Rail
-        state={{ status: "ready", snapshot: [blocked] }}
+        state={{ status: "ready", snapshot: [waiting] }}
         side="left"
         providers={["grok"]}
         shifts={collapsedShifts}
@@ -210,7 +206,7 @@ describe("states of the new providers", () => {
         onRefresh={vi.fn()}
       />,
     );
-    expect(markup).toContain('data-flag="blocked"');
+    expect(markup).toContain('data-flag="waiting"');
     expect(markup).toContain('class="ring-flag"');
   });
 

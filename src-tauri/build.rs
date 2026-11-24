@@ -11,6 +11,7 @@ fn main() {
             "get_settings",
             "set_preferences",
             "get_diagnostics",
+            "reset_provider_safety",
             "send_test_notification",
         ]),
     ))

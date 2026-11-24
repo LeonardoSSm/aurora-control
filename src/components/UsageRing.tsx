@@ -24,14 +24,17 @@ interface UsageRingProps {
 /**
  * Whether the collapsed indicator carries a flag: `issue` when the provider
  * needs the user's attention (sign-in, errors, a chosen metric that is gone),
- * `blocked` when the quota source is unavailable by design.
+ * `waiting` when the reading comes from the provider's own client and that
+ * client has not written a current record yet (nothing is wrong).
  */
 export function attention(
   usage: Usage | undefined,
-): "issue" | "blocked" | null {
+): "issue" | "waiting" | null {
   if (!usage || usage.source === "demo") return null;
-  if (usage.issue?.code === "sourceBlocked")
-    return usage.issue.reason === "cliSafety" ? "issue" : "blocked";
+  // A suspended CLI is a problem to look at.
+  if (usage.issue?.code === "sourceBlocked") return "issue";
+  if (usage.issue?.code === "awaitingClient" && usage.status !== "available")
+    return "waiting";
   if (usage.metricMissing) return "issue";
   if (usage.issue && usage.status !== "available") return "issue";
   return null;

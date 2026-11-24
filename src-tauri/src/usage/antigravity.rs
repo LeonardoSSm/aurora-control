@@ -11,28 +11,28 @@
 //! The Antigravity Additional Terms (section 6) forbid third-party software
 //! that accesses the service, for example with the Antigravity OAuth. Here the
 //! official client does the access, through the mode the docs offer for
-//! scripts; see `docs/cycle-03-1/provider-terms-review.md` for the reasoning
-//! and the residual risk. The provider stays disabled until the user enables
-//! it.
+//! scripts; see `docs/cycle-03-1/provider-terms-review.md` and
+//! `docs/cycle-04/security-audit.md` for the reasoning and the residual risk.
+//! The provider stays disabled until the user enables it.
 //!
-//! The subprocess is controlled by this module only:
+//! The subprocess is controlled by this module and [`super::process`]:
 //! - fixed executable (`%LOCALAPPDATA%\agy\bin\agy.exe`, where the official
 //!   installer puts it) and fixed arguments; nothing comes from the WebView;
 //! - no console window, no stdin, a neutral working directory (home);
-//! - timeout, output limit, cancellation when the provider is disabled, and a
-//!   single run at a time;
+//! - timeout, output limit, a Job Object that takes every descendant down
+//!   with the CLI, cancellation when the provider is disabled (an attempt
+//!   cancelled once is void, even if the provider is enabled again at once),
+//!   and a single run at a time;
 //! - `--settings '{"disableSlashCommands":false}'` (session-only, never saved)
 //!   so a user setting cannot turn `/usage` into a prompt;
-//! - a breaker: if the CLI ever reports a model turn or token usage, the
-//!   source is suspended until the app restarts, so a CLI change can never
-//!   keep spending the user's quota.
+//! - a breaker ([`super::safety`]): if the CLI reports a model turn or token
+//!   usage, or answers successfully without proving it did not, the source is
+//!   suspended, across restarts, until the user re-enables it knowingly.
 
-use std::io::Read;
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -42,11 +42,15 @@ use super::adapter::{
 };
 use super::local::{env_dir, home_dir};
 use super::model::{BlockReason, DiagnosticRow, DiagnosticState, Origin, Provider, Quota};
+use super::process::{self, CliOutput, Control, Limits, RunError};
+use super::safety::{Breaker, Cause};
 use super::session::Session;
 use super::time;
 
-const TIMEOUT: Duration = Duration::from_secs(45);
-const MAX_OUTPUT: usize = 256 * 1024;
+const LIMITS: Limits = Limits {
+    timeout: Duration::from_secs(45),
+    max_output: 256 * 1024,
+};
 const MAX_BUCKETS: usize = 32;
 const ARGS: [&str; 6] = [
     "-p",
@@ -57,30 +61,9 @@ const ARGS: [&str; 6] = [
     r#"{"disableSlashCommands":false}"#,
 ];
 
-/// What a finished CLI run produced.
-#[derive(Clone, Debug, PartialEq)]
-pub struct CliOutput {
-    pub code: Option<i32>,
-    pub stdout: String,
-    pub stderr: String,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RunError {
-    /// The executable is not installed.
-    Missing,
-    /// It could not be started.
-    Spawn,
-    Timeout,
-    /// More output than any quota report needs.
-    TooLarge,
-    /// The provider was disabled while the run was in progress.
-    Cancelled,
-}
-
 /// Runs the CLI. A trait so tests replay outputs without starting processes.
 pub trait Runner: Send + Sync + 'static {
-    fn run(&self, cancel: &AtomicBool) -> Result<CliOutput, RunError>;
+    fn run(&self, control: &Control) -> Result<CliOutput, RunError>;
     fn installed(&self) -> bool;
 }
 
@@ -99,39 +82,12 @@ impl Agy {
     }
 }
 
-/// Reads at most `limit` bytes from `reader`, flagging anything beyond.
-fn drain(mut reader: impl Read, limit: usize) -> (Vec<u8>, bool) {
-    let mut buffer = Vec::new();
-    let mut chunk = [0u8; 8192];
-    let mut over = false;
-    loop {
-        match reader.read(&mut chunk) {
-            Ok(0) | Err(_) => break,
-            Ok(read) => {
-                if buffer.len() + read > limit {
-                    over = true;
-                    // Keep reading (and discarding) so the child never blocks
-                    // on a full pipe before it is killed.
-                    continue;
-                }
-                buffer.extend_from_slice(&chunk[..read]);
-            }
-        }
-    }
-    (buffer, over)
-}
-
-fn stop(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
 impl Runner for Agy {
     fn installed(&self) -> bool {
         self.exe.as_ref().is_some_and(|exe| exe.is_file())
     }
 
-    fn run(&self, cancel: &AtomicBool) -> Result<CliOutput, RunError> {
+    fn run(&self, control: &Control) -> Result<CliOutput, RunError> {
         let exe = self
             .exe
             .as_ref()
@@ -143,84 +99,38 @@ impl Runner for Agy {
             // The CLI would otherwise add a log file to its own folder on every
             // run; one file of ours, overwritten each time, keeps it clean.
             .arg("--log-file")
-            .arg(std::env::temp_dir().join("aurora-control-agy.log"))
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .arg(std::env::temp_dir().join("aurora-control-agy.log"));
         if let Some(cwd) = &self.cwd {
             command.current_dir(cwd);
         }
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            // CREATE_NO_WINDOW: no console flashes on the user's screen.
-            command.creation_flags(0x0800_0000);
-        }
-        if cancel.load(Ordering::SeqCst) {
-            return Err(RunError::Cancelled);
-        }
-        let mut child = command.spawn().map_err(|_| RunError::Spawn)?;
-        let stdout = child.stdout.take().ok_or(RunError::Spawn)?;
-        let stderr = child.stderr.take().ok_or(RunError::Spawn)?;
-        let out = std::thread::spawn(move || drain(stdout, MAX_OUTPUT));
-        let err = std::thread::spawn(move || drain(stderr, MAX_OUTPUT));
-
-        let started = Instant::now();
-        let status = loop {
-            if cancel.load(Ordering::SeqCst) {
-                stop(&mut child);
-                return Err(RunError::Cancelled);
-            }
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) if started.elapsed() >= TIMEOUT => {
-                    stop(&mut child);
-                    return Err(RunError::Timeout);
-                }
-                Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-                Err(_) => {
-                    stop(&mut child);
-                    return Err(RunError::Spawn);
-                }
-            }
-        };
-        let (stdout, over_out) = out.join().unwrap_or_default();
-        let (stderr, _) = err.join().unwrap_or_default();
-        if over_out {
-            return Err(RunError::TooLarge);
-        }
-        Ok(CliOutput {
-            code: status.code(),
-            stdout: String::from_utf8_lossy(&stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&stderr).into_owned(),
-        })
+        process::run(command, control, LIMITS)
     }
 }
 
 pub struct Antigravity<R: Runner> {
     runner: R,
-    /// Set while the provider is disabled: a run in progress is killed.
-    cancel: AtomicBool,
+    /// Disables cancel the run in progress and void pending attempts.
+    control: Control,
     /// One CLI run at a time, whatever calls the adapter.
     running: Mutex<()>,
-    /// The CLI once reported a model turn or token usage: suspended until the
-    /// app restarts.
-    tripped: AtomicBool,
+    /// Persistent suspension after a model turn or an unconfirmed answer.
+    breaker: Breaker,
 }
 
 impl Antigravity<Agy> {
-    pub fn detect() -> Self {
-        Self::new(Agy::detect())
+    /// `config` is the app's configuration folder, where the breaker lives.
+    pub fn detect(config: Option<&Path>) -> Self {
+        Self::new(Agy::detect(), Breaker::load(config, "antigravity"))
     }
 }
 
 impl<R: Runner> Antigravity<R> {
-    pub fn new(runner: R) -> Self {
+    pub fn new(runner: R, breaker: Breaker) -> Self {
         Self {
             runner,
-            cancel: AtomicBool::new(false),
+            control: Control::new(),
             running: Mutex::new(()),
-            tripped: AtomicBool::new(false),
+            breaker,
         }
     }
 }
@@ -269,22 +179,33 @@ fn quota_id(raw: &str) -> Option<String> {
 pub enum Rejected {
     /// The CLI ran an agent turn or spent tokens.
     Turn,
+    /// The answer does not prove that no turn ran: no JSON envelope, no turn
+    /// or token counters, or a command other than `/usage`.
+    Unconfirmed,
+    /// A `/usage` report with zero turns and tokens, but no usable data.
     Error(FetchError),
 }
 
-/// Normalizes the CLI's `/usage` JSON. Only `command.name == "usage"` with no
-/// turn and no token usage is a report; anything else is rejected, and a turn
-/// trips the breaker.
+/// A counter of the envelope, if it is present and numeric.
+fn counter(value: &Value) -> Option<u64> {
+    value.as_u64()
+}
+
+/// Normalizes the CLI's `/usage` JSON. Only `command.name == "usage"` with
+/// explicit zero turns and zero tokens is a report. A turn, or an answer
+/// that cannot prove there was none, is rejected so the breaker trips.
 pub fn parse_usage(stdout: &str, now: DateTime<Utc>) -> Result<Vec<Quota>, Rejected> {
     let malformed = |what: &str| Rejected::Error(FetchError::Malformed(what.into()));
-    let value: Value = serde_json::from_str(stdout.trim()).map_err(|_| malformed("agy json"))?;
-    let turns = value["num_turns"].as_u64().unwrap_or(0);
-    let tokens = value["usage"]["total_tokens"].as_u64().unwrap_or(0);
-    if turns > 0 || tokens > 0 {
+    let Ok(value) = serde_json::from_str::<Value>(stdout.trim()) else {
+        return Err(Rejected::Unconfirmed);
+    };
+    let turns = counter(&value["num_turns"]);
+    let tokens = counter(&value["usage"]["total_tokens"]);
+    if turns.is_some_and(|turns| turns > 0) || tokens.is_some_and(|tokens| tokens > 0) {
         return Err(Rejected::Turn);
     }
-    if value["command"]["name"].as_str() != Some("usage") {
-        return Err(malformed("agy command"));
+    if turns.is_none() || tokens.is_none() || value["command"]["name"].as_str() != Some("usage") {
+        return Err(Rejected::Unconfirmed);
     }
     let groups = value["command"]["data"]["groups"]
         .as_array()
@@ -363,20 +284,26 @@ fn failed_run(output: &CliOutput) -> FetchError {
     }
 }
 
+fn cause_text(cause: Cause) -> &'static str {
+    match cause {
+        Cause::ModelTurn => "o CLI executou uma rodada do modelo em vez de só informar a cota",
+        Cause::Unconfirmed => {
+            "o CLI respondeu sem provar que não executou uma rodada do modelo (formato inesperado)"
+        }
+        Cause::Unknown => "o registro do bloqueio de segurança não pôde ser lido",
+    }
+}
+
 impl<R: Runner> Antigravity<R> {
     fn query(&self, now: DateTime<Utc>) -> Result<Fetched, FetchError> {
-        if self.tripped.load(Ordering::SeqCst) {
+        if self.breaker.tripped().is_some() {
             return Err(FetchError::SourceBlocked(BlockReason::CliSafety));
         }
         let Ok(_running) = self.running.try_lock() else {
             // Another run is in progress: never two CLIs at once.
             return Err(FetchError::Timeout);
         };
-        // Disabled meanwhile: nothing is started.
-        if self.cancel.load(Ordering::SeqCst) {
-            return Err(FetchError::Timeout);
-        }
-        let output = match self.runner.run(&self.cancel) {
+        let output = match self.runner.run(&self.control) {
             Ok(output) => output,
             Err(RunError::Missing) => return Err(FetchError::AuthMissing),
             Err(RunError::Timeout | RunError::Cancelled) => return Err(FetchError::Timeout),
@@ -386,7 +313,7 @@ impl<R: Runner> Antigravity<R> {
         if output.code != Some(0) {
             // A failed run may still carry the envelope: a turn is a turn.
             if let Err(Rejected::Turn) = parse_usage(&output.stdout, now) {
-                self.trip();
+                return Err(self.trip(Cause::ModelTurn, now));
             }
             return Err(failed_run(&output));
         }
@@ -402,17 +329,16 @@ impl<R: Runner> Antigravity<R> {
                 quotas,
                 observed_at: now,
             }),
-            Err(Rejected::Turn) => {
-                self.trip();
-                Err(FetchError::SourceBlocked(BlockReason::CliSafety))
-            }
+            Err(Rejected::Turn) => Err(self.trip(Cause::ModelTurn, now)),
+            Err(Rejected::Unconfirmed) => Err(self.trip(Cause::Unconfirmed, now)),
             Err(Rejected::Error(error)) => Err(error),
         }
     }
 
-    fn trip(&self) {
-        self.tripped.store(true, Ordering::SeqCst);
-        eprintln!("Aurora Control: the Antigravity CLI ran a model turn; queries suspended");
+    fn trip(&self, cause: Cause, now: DateTime<Utc>) -> FetchError {
+        self.breaker.trip(cause, now);
+        eprintln!("Aurora Control: Antigravity queries suspended ({cause:?})");
+        FetchError::SourceBlocked(BlockReason::CliSafety)
     }
 }
 
@@ -431,7 +357,7 @@ impl<R: Runner> UsageAdapter for Antigravity<R> {
         })
     }
 
-    /// Never clears the cancel flag: a provider disabled between the worker's
+    /// Never clears a cancellation: a provider disabled between the worker's
     /// check and this call must not start the CLI. Only `resume`, called
     /// when the provider is enabled again, clears it.
     fn fetch(&self, now: DateTime<Utc>) -> Outcome {
@@ -446,11 +372,20 @@ impl<R: Runner> UsageAdapter for Antigravity<R> {
     }
 
     fn cancel(&self) {
-        self.cancel.store(true, Ordering::SeqCst);
+        self.control.cancel();
     }
 
     fn resume(&self) {
-        self.cancel.store(false, Ordering::SeqCst);
+        self.control.resume();
+    }
+
+    fn reset_safety(&self) -> Result<bool, String> {
+        if self.breaker.tripped().is_none() {
+            return Ok(false);
+        }
+        self.breaker.reset()?;
+        eprintln!("Aurora Control: Antigravity queries re-enabled by the user");
+        Ok(true)
     }
 
     fn diagnostics(&self, _now: DateTime<Utc>) -> Option<Vec<DiagnosticRow>> {
@@ -467,23 +402,25 @@ impl<R: Runner> UsageAdapter for Antigravity<R> {
                 "Não encontrado em %LOCALAPPDATA%\\agy\\bin. Instale o Antigravity CLI.",
             )
         }];
-        rows.push(DiagnosticRow::new(
-            "Fonte de cotas",
-            if self.tripped.load(Ordering::SeqCst) {
-                DiagnosticState::Error
-            } else {
-                DiagnosticState::Ok
+        rows.push(match self.breaker.tripped() {
+            Some(trip) => DiagnosticRow {
+                at: trip.at.map(rfc3339),
+                ..DiagnosticRow::new(
+                    "Fonte de cotas",
+                    DiagnosticState::Error,
+                    format!("Suspensa por segurança: {}", cause_text(trip.cause)),
+                )
             },
-            if self.tripped.load(Ordering::SeqCst) {
-                "Suspensa: o CLI executou uma rodada do modelo"
-            } else {
-                "agy -p /usage (CLI oficial, sem rodada do modelo)"
-            },
-        ));
+            None => DiagnosticRow::new(
+                "Fonte de cotas",
+                DiagnosticState::Ok,
+                "agy -p /usage (CLI oficial, sem rodada do modelo)",
+            ),
+        });
         rows.push(DiagnosticRow::new(
             "Conta",
             DiagnosticState::Info,
-            "Não verificável localmente; a cota é a da sessão do CLI",
+            "Não verificável localmente; a cota é a da sessão do CLI e não gera alertas de consumo",
         ));
         Some(rows)
     }
@@ -492,6 +429,8 @@ impl<R: Runner> UsageAdapter for Antigravity<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Instant;
 
     fn now() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-11-24T05:20:00Z")
@@ -539,7 +478,11 @@ mod tests {
     }
 
     impl Runner for Script {
-        fn run(&self, _cancel: &AtomicBool) -> Result<CliOutput, RunError> {
+        fn run(&self, control: &Control) -> Result<CliOutput, RunError> {
+            // Like the production runner: nothing starts once cancelled.
+            if control.is_cancelled() {
+                return Err(RunError::Cancelled);
+            }
             *self.runs.lock().unwrap() += 1;
             self.replies.lock().unwrap().remove(0)
         }
@@ -549,9 +492,15 @@ mod tests {
         }
     }
 
+    fn adapter(replies: Vec<Result<CliOutput, RunError>>) -> Antigravity<Script> {
+        Antigravity::new(Script::new(replies), Breaker::memory())
+    }
+
     fn result(outcome: &Outcome) -> &Result<Fetched, FetchError> {
         outcome.result.as_ref().unwrap()
     }
+
+    const BLOCKED: FetchError = FetchError::SourceBlocked(BlockReason::CliSafety);
 
     #[test]
     fn the_real_report_becomes_four_windows_in_two_groups() {
@@ -587,7 +536,7 @@ mod tests {
 
     #[test]
     fn a_successful_run_is_a_cli_reading_without_an_account() {
-        let adapter = Antigravity::new(Script::new(vec![Script::ok(REAL)]));
+        let adapter = adapter(vec![Script::ok(REAL)]);
         let outcome = adapter.fetch(now());
         let fetched = result(&outcome).as_ref().unwrap();
         assert_eq!(fetched.origin, Origin::Cli);
@@ -606,54 +555,112 @@ mod tests {
         let tokens = REAL.replace("\"total_tokens\": 0", "\"total_tokens\": 5");
         assert_eq!(parse_usage(&tokens, now()), Err(Rejected::Turn));
 
-        let adapter = Antigravity::new(Script::new(vec![Script::ok(&turn), Script::ok(REAL)]));
-        assert_eq!(
-            result(&adapter.fetch(now())),
-            &Err(FetchError::SourceBlocked(BlockReason::CliSafety))
-        );
+        let adapter = adapter(vec![Script::ok(&turn), Script::ok(REAL)]);
+        assert_eq!(result(&adapter.fetch(now())), &Err(BLOCKED));
         // Suspended: the CLI is not started again.
-        assert_eq!(
-            result(&adapter.fetch(now())),
-            &Err(FetchError::SourceBlocked(BlockReason::CliSafety))
-        );
+        assert_eq!(result(&adapter.fetch(now())), &Err(BLOCKED));
         assert_eq!(*adapter.runner.runs.lock().unwrap(), 1);
+        assert_eq!(
+            adapter.breaker.tripped().map(|trip| trip.cause),
+            Some(Cause::ModelTurn)
+        );
     }
 
     #[test]
-    fn a_prompt_answered_by_the_model_is_never_a_report() {
+    fn the_breaker_survives_a_restart_and_only_an_explicit_reset_lifts_it() {
+        let dir = crate::usage::local::testing::TempDir::new("agy-breaker");
+        let turn = REAL.replace("\"num_turns\": 0", "\"num_turns\": 1");
+        let first = Antigravity::new(
+            Script::new(vec![Script::ok(&turn)]),
+            Breaker::load(Some(dir.path()), "antigravity"),
+        );
+        assert_eq!(result(&first.fetch(now())), &Err(BLOCKED));
+
+        // A restart (or an automatic start with Windows): still suspended,
+        // and the CLI never runs.
+        let restarted = Antigravity::new(
+            Script::new(vec![Script::ok(REAL)]),
+            Breaker::load(Some(dir.path()), "antigravity"),
+        );
+        assert_eq!(result(&restarted.fetch(now())), &Err(BLOCKED));
+        assert_eq!(*restarted.runner.runs.lock().unwrap(), 0);
+        let rows = format!("{:?}", restarted.diagnostics(now()).unwrap());
+        assert!(rows.contains("rodada do modelo"), "{rows}");
+
+        // Disabling and enabling the provider is not a reset.
+        restarted.cancel();
+        restarted.resume();
+        assert_eq!(result(&restarted.fetch(now())), &Err(BLOCKED));
+
+        // The user re-enables it knowingly.
+        assert_eq!(restarted.reset_safety(), Ok(true));
+        assert!(result(&restarted.fetch(now())).is_ok());
+        assert_eq!(restarted.reset_safety(), Ok(false));
+    }
+
+    #[test]
+    fn an_answer_that_cannot_prove_the_absence_of_a_turn_trips_the_breaker() {
         // What a mangled argument produced on 2026-11-24: a normal prompt.
         let answered = r#"{"conversation_id": "x", "status": "SUCCESS", "response": "It looks like…", "num_turns": 1,
             "usage": {"total_tokens": 22428}}"#;
         assert_eq!(parse_usage(answered, now()), Err(Rejected::Turn));
+        for unconfirmed in [
+            // Plain text: a prompt answered without the JSON envelope.
+            "Here is a summary of your usage…",
+            "",
+            "{}",
+            // Counters missing or not numbers.
+            r#"{"command": {"name": "usage", "data": {"groups": []}}}"#,
+            r#"{"num_turns": 0, "command": {"name": "usage", "data": {}}}"#,
+            r#"{"num_turns": "0", "usage": {"total_tokens": 0}, "command": {"name": "usage"}}"#,
+            // Another command than the one asked for.
+            r#"{"num_turns": 0, "usage": {"total_tokens": 0}, "command": {"name": "model", "data": {}}}"#,
+        ] {
+            assert_eq!(
+                parse_usage(unconfirmed, now()),
+                Err(Rejected::Unconfirmed),
+                "{unconfirmed}"
+            );
+        }
+        let adapter = adapter(vec![Script::ok("Sure! Your quota is…"), Script::ok(REAL)]);
+        assert_eq!(result(&adapter.fetch(now())), &Err(BLOCKED));
+        assert_eq!(result(&adapter.fetch(now())), &Err(BLOCKED));
+        assert_eq!(*adapter.runner.runs.lock().unwrap(), 1);
+        assert_eq!(
+            adapter.breaker.tripped().map(|trip| trip.cause),
+            Some(Cause::Unconfirmed)
+        );
     }
 
     #[test]
-    fn incomplete_malformed_and_out_of_range_reports_are_rejected() {
-        for body in [
-            "not json",
+    fn a_confirmed_report_without_usable_data_is_malformed_not_a_trip() {
+        let envelope = |data: &str| {
+            format!(
+                r#"{{"num_turns": 0, "usage": {{"total_tokens": 0}}, "command": {{"name": "usage", "data": {data}}}}}"#
+            )
+        };
+        for data in [
             "{}",
-            r#"{"num_turns": 0, "command": {"name": "model", "data": {}}}"#,
-            r#"{"num_turns": 0, "command": {"name": "usage", "data": {}}}"#,
-            r#"{"num_turns": 0, "command": {"name": "usage", "data": {"groups": []}}}"#,
-            r#"{"num_turns": 0, "command": {"name": "usage", "data": {"groups": [{"name": "G", "buckets": [
-                {"id": "g-w", "window": "weekly", "remaining_fraction": 1.7}]}]}}}"#,
-            r#"{"num_turns": 0, "command": {"name": "usage", "data": {"groups": [{"name": "G", "buckets": [
-                {"id": "g-x", "window": "monthly-ish", "remaining_fraction": 0.5}]}]}}}"#,
+            r#"{"groups": []}"#,
+            r#"{"groups": [{"name": "G", "buckets": [{"id": "g-w", "window": "weekly", "remaining_fraction": 1.7}]}]}"#,
+            r#"{"groups": [{"name": "G", "buckets": [{"id": "g-x", "window": "monthly-ish", "remaining_fraction": 0.5}]}]}"#,
         ] {
             assert!(
                 matches!(
-                    parse_usage(body, now()),
+                    parse_usage(&envelope(data), now()),
                     Err(Rejected::Error(FetchError::Malformed(_)))
                 ),
-                "{body}"
+                "{data}"
             );
         }
         // Invalid buckets are skipped; valid ones remain.
-        let mixed = r#"{"num_turns": 0, "command": {"name": "usage", "data": {"groups": [{"name": "G", "buckets": [
+        let mixed = envelope(
+            r#"{"groups": [{"name": "G", "buckets": [
             {"id": "bad", "window": "5h", "remaining_fraction": -0.2},
             {"id": "off", "window": "5h", "remaining_fraction": 0.1, "disabled": true},
-            {"id": "ok", "window": "5h", "remaining_fraction": 0.25, "reset_time": "2099-01-01T00:00:00Z"}]}]}}}"#;
-        let quotas = parse_usage(mixed, now()).unwrap();
+            {"id": "ok", "window": "5h", "remaining_fraction": 0.25, "reset_time": "2099-01-01T00:00:00Z"}]}]}"#,
+        );
+        let quotas = parse_usage(&mixed, now()).unwrap();
         assert_eq!(quotas.len(), 1);
         assert_eq!(
             (quotas[0].id.as_str(), quotas[0].percent_used),
@@ -661,6 +668,12 @@ mod tests {
         );
         // An implausible renewal is dropped, the reading kept.
         assert_eq!(quotas[0].resets_at, None);
+        let adapter = adapter(vec![Script::ok(&envelope("{}"))]);
+        assert!(matches!(
+            result(&adapter.fetch(now())),
+            Err(FetchError::Malformed(_))
+        ));
+        assert_eq!(adapter.breaker.tripped(), None);
     }
 
     #[test]
@@ -695,8 +708,10 @@ mod tests {
             (Err(RunError::Missing), FetchError::AuthMissing),
         ];
         for (reply, expected) in cases {
-            let adapter = Antigravity::new(Script::new(vec![reply]));
+            let adapter = adapter(vec![reply]);
             assert_eq!(result(&adapter.fetch(now())), &Err(expected));
+            // A failed exit is not evidence of a turn.
+            assert_eq!(adapter.breaker.tripped(), None);
         }
     }
 
@@ -704,7 +719,7 @@ mod tests {
     fn without_the_cli_the_session_is_signed_out_and_nothing_runs() {
         let mut script = Script::new(vec![]);
         script.installed = false;
-        let adapter = Antigravity::new(script);
+        let adapter = Antigravity::new(script, Breaker::memory());
         assert_eq!(adapter.session(now()), Some(Session::SignedOut));
         let outcome = adapter.fetch(now());
         assert_eq!(result(&outcome), &Err(FetchError::AuthMissing));
@@ -723,22 +738,13 @@ mod tests {
     }
 
     #[test]
-    fn drain_stops_collecting_past_the_limit() {
-        let (bytes, over) = drain(&b"abcdef"[..], 4);
-        assert!(over);
-        assert!(bytes.len() <= 4);
-        let (bytes, over) = drain(&b"abc"[..], 4);
-        assert_eq!((bytes.as_slice(), over), (&b"abc"[..], false));
-    }
-
-    #[test]
     fn cancel_and_single_run_are_honored() {
         // A runner that waits for the cancel flag, like a real slow CLI.
         struct Slow;
         impl Runner for Slow {
-            fn run(&self, cancel: &AtomicBool) -> Result<CliOutput, RunError> {
+            fn run(&self, control: &Control) -> Result<CliOutput, RunError> {
                 let started = Instant::now();
-                while !cancel.load(Ordering::SeqCst) {
+                while !control.is_cancelled() {
                     if started.elapsed() > Duration::from_secs(5) {
                         return Err(RunError::Timeout);
                     }
@@ -750,7 +756,7 @@ mod tests {
                 true
             }
         }
-        let adapter = std::sync::Arc::new(Antigravity::new(Slow));
+        let adapter = std::sync::Arc::new(Antigravity::new(Slow, Breaker::memory()));
         let worker = {
             let adapter = std::sync::Arc::clone(&adapter);
             std::thread::spawn(move || adapter.fetch(now()))
@@ -765,7 +771,7 @@ mod tests {
 
     #[test]
     fn a_cancel_before_fetch_is_kept_until_the_provider_is_enabled_again() {
-        let adapter = Antigravity::new(Script::new(vec![Script::ok(REAL)]));
+        let adapter = adapter(vec![Script::ok(REAL)]);
         // Disabled after the worker's check, before it called fetch.
         adapter.cancel();
         assert_eq!(result(&adapter.fetch(now())), &Err(FetchError::Timeout));
@@ -783,13 +789,72 @@ mod tests {
         assert_eq!(*adapter.runner.runs.lock().unwrap(), 1);
     }
 
+    #[test]
+    fn rapid_disable_and_enable_cycles_never_run_two_clis() {
+        // Counts concurrent runs of a runner that honors the control.
+        struct Counting {
+            active: AtomicBool,
+            overlap: AtomicBool,
+            runs: Mutex<u32>,
+        }
+        impl Runner for Counting {
+            fn run(&self, control: &Control) -> Result<CliOutput, RunError> {
+                if control.is_cancelled() {
+                    return Err(RunError::Cancelled);
+                }
+                if self.active.swap(true, Ordering::SeqCst) {
+                    self.overlap.store(true, Ordering::SeqCst);
+                }
+                *self.runs.lock().unwrap() += 1;
+                std::thread::sleep(Duration::from_millis(2));
+                self.active.store(false, Ordering::SeqCst);
+                Ok(CliOutput {
+                    code: Some(0),
+                    stdout: REAL.into(),
+                    stderr: String::new(),
+                })
+            }
+            fn installed(&self) -> bool {
+                true
+            }
+        }
+        let adapter = std::sync::Arc::new(Antigravity::new(
+            Counting {
+                active: AtomicBool::new(false),
+                overlap: AtomicBool::new(false),
+                runs: Mutex::new(0),
+            },
+            Breaker::memory(),
+        ));
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                let adapter = std::sync::Arc::clone(&adapter);
+                std::thread::spawn(move || {
+                    for _ in 0..50 {
+                        adapter.fetch(now());
+                    }
+                })
+            })
+            .collect();
+        for _ in 0..200 {
+            adapter.cancel();
+            adapter.resume();
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert!(!adapter.runner.overlap.load(Ordering::SeqCst));
+        // Ends enabled: a fetch runs.
+        assert!(result(&adapter.fetch(now())).is_ok());
+    }
+
     /// Runs the real `agy.exe` through the production runner. Opt-in only:
     /// `cargo test --locked live_antigravity -- --ignored --nocapture`.
     /// Prints only the normalized quotas (no account data exists in them).
     #[test]
     #[ignore = "runs the installed Antigravity CLI"]
     fn live_antigravity_cli() {
-        let adapter = Antigravity::detect();
+        let adapter = Antigravity::new(Agy::detect(), Breaker::memory());
         assert!(adapter.runner.installed(), "agy.exe not installed");
         let started = Instant::now();
         let outcome = adapter.fetch(Utc::now());
@@ -802,6 +867,6 @@ mod tests {
             );
         }
         println!("origin {:?}, {} ms", fetched.origin, elapsed.as_millis());
-        assert!(!adapter.tripped.load(Ordering::SeqCst), "no model turn");
+        assert_eq!(adapter.breaker.tripped(), None, "no model turn");
     }
 }
