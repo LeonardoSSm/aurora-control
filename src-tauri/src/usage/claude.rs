@@ -455,6 +455,9 @@ fn scan_activity(projects: &Path, now: DateTime<Utc>, tail_limit: u64) -> Option
                 continue;
             }
             let Ok(tail) = read_tail_within(&path, tail_limit, &mut budget) else {
+                // A recent transcript left unread (locked, denied, or beyond
+                // the budget) leaves the total incomplete.
+                cut_window = true;
                 continue;
             };
             if tail.cut && !covers_since(&tail.text, since) {
@@ -1219,5 +1222,23 @@ mod truncation_tests {
         let activity = scan_activity(&dir.path().join("projects"), now(), 1024).unwrap();
         assert_eq!(activity.tokens, 10);
         assert!(!activity.partial);
+    }
+
+    #[test]
+    fn an_unreadable_recent_transcript_is_partial() {
+        // A recent entry that cannot be opened as a file (here a directory
+        // with the transcript extension, as a locked file would fail).
+        let dir = TempDir::new("claude-unreadable");
+        dir.write(
+            "projects/p/a.jsonl",
+            &turn("readable", "2026-11-23T17:30:00Z"),
+        );
+        std::fs::create_dir_all(dir.path().join("projects/p/b.jsonl")).unwrap();
+        let activity = scan_activity(&dir.path().join("projects"), now(), TRANSCRIPT_TAIL).unwrap();
+        assert_eq!(activity.tokens, 10);
+        assert!(
+            activity.partial,
+            "the unread transcript may hold more turns"
+        );
     }
 }

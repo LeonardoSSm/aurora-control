@@ -182,6 +182,18 @@ fn guarded<T>(job: impl FnOnce() -> T) -> Option<T> {
     catch_unwind(AssertUnwindSafe(job)).ok()
 }
 
+/// How long a worker sleeps before looking again. A hidden provider never
+/// starts an attempt, so its next wake-up stays overdue: it sleeps the
+/// longest instead of spinning at the shortest; `set_visible` wakes it.
+fn sleep_for(enabled: bool, next: std::time::Instant, now: std::time::Instant) -> Duration {
+    if enabled {
+        next.saturating_duration_since(now)
+            .clamp(MIN_SLEEP, MAX_SLEEP)
+    } else {
+        MAX_SLEEP
+    }
+}
+
 fn worker(slot: &Slot, notify: &Notify) {
     // The last state announced, to publish transitions that happen without a
     // network result (renewals, ageing, a logout seen by the probe).
@@ -190,10 +202,8 @@ fn worker(slot: &Slot, notify: &Notify) {
         let manual = {
             let wait = {
                 let now = Now::current();
-                lock(&slot.tracker)
-                    .next_wake(now)
-                    .saturating_duration_since(now.instant)
-                    .clamp(MIN_SLEEP, MAX_SLEEP)
+                let next = lock(&slot.tracker).next_wake(now);
+                sleep_for(slot.enabled.load(Ordering::SeqCst), next, now.instant)
             };
             let manual = lock(&slot.manual);
             let mut manual = wait_timeout_while(&slot.wake, manual, wait, |manual| !*manual);
@@ -442,6 +452,87 @@ mod tests {
         assert_eq!(*lock(&reads), 1, "no file read while hidden");
         service.set_visible(&[Provider::ClaudeCode]);
         assert!(service.diagnostics(Provider::ClaudeCode).is_some());
+    }
+
+    /// Counts every local probe and fetch, which read credentials, transcripts
+    /// or the network.
+    struct Counted {
+        probes: Arc<Mutex<u32>>,
+        fetches: Arc<Mutex<u32>>,
+        inner: demo::DemoAdapter,
+    }
+
+    impl UsageAdapter for Counted {
+        fn provider(&self) -> Provider {
+            Provider::ClaudeCode
+        }
+        fn fetch(&self, now: chrono::DateTime<chrono::Utc>) -> Outcome {
+            *lock(&self.fetches) += 1;
+            self.inner.fetch(now)
+        }
+        fn session(&self, _now: chrono::DateTime<chrono::Utc>) -> Option<session::Session> {
+            *lock(&self.probes) += 1;
+            None
+        }
+    }
+
+    #[test]
+    fn a_hidden_worker_reads_nothing_until_shown_again() {
+        let (probes, fetches) = (Arc::new(Mutex::new(0)), Arc::new(Mutex::new(0)));
+        let service = Service::with_policy(
+            vec![Box::new(Counted {
+                probes: Arc::clone(&probes),
+                fetches: Arc::clone(&fetches),
+                inner: demo::DemoAdapter::new(Provider::ClaudeCode, 30),
+            })],
+            Policy {
+                manual_gap: Duration::ZERO,
+                backoff_min: Duration::ZERO,
+                ..Policy::default()
+            },
+        );
+        // Hidden before the worker starts, as `windows::setup` does.
+        service.set_visible(&[Provider::Codex]);
+        let (sender, receiver) = mpsc::channel();
+        let sender = Mutex::new(sender);
+        service.start(Box::new(move || {
+            let _ = lock(&sender).send(());
+        }));
+        // Manual refreshes while hidden wake the worker but read nothing.
+        for _ in 0..3 {
+            service.refresh(None);
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            receiver.try_recv().is_err(),
+            "nothing published while hidden"
+        );
+        assert_eq!((*lock(&probes), *lock(&fetches)), (0, 0));
+
+        // Shown again: it probes and refreshes at once.
+        service.set_visible(&[Provider::ClaudeCode]);
+        for _ in 0..2 {
+            receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        assert!(*lock(&probes) >= 1);
+        assert_eq!(*lock(&fetches), 1);
+        assert_eq!(
+            service.snapshot()[0].reading,
+            model::Reading::Available { percent_used: 30 }
+        );
+    }
+
+    #[test]
+    fn a_hidden_worker_with_an_overdue_refresh_sleeps_instead_of_spinning() {
+        let now = std::time::Instant::now();
+        let overdue = now.checked_sub(Duration::from_secs(60)).unwrap_or(now);
+        // Before: an overdue wake-up kept a hidden worker at MIN_SLEEP.
+        assert_eq!(sleep_for(true, overdue, now), MIN_SLEEP);
+        assert_eq!(sleep_for(false, overdue, now), MAX_SLEEP);
+        assert_eq!(
+            sleep_for(true, now + Duration::from_secs(30), now),
+            Duration::from_secs(30)
+        );
     }
 
     #[test]

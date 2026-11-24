@@ -220,6 +220,25 @@ export function Settings({
           />
         </div>
         <p className="settings-hint">{startupNotes[view.startup]}</p>
+        {view.startupMismatch && (
+          <div className="settings-hint settings-warning" role="alert">
+            <p>
+              {preferences.launchAtStartup
+                ? "A preferência está ativa, mas o Windows não tem a entrada deste aplicativo."
+                : "A preferência está desativada, mas o Windows ainda tem a entrada deste aplicativo."}
+            </p>
+            <div className="settings-actions">
+              <button
+                type="button"
+                className="ghost"
+                disabled={saving}
+                onClick={() => onSave(preferences)}
+              >
+                Corrigir
+              </button>
+            </div>
+          </div>
+        )}
       </Section>
 
       <Section

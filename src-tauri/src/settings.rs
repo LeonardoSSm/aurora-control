@@ -20,6 +20,8 @@ pub struct SettingsView {
     /// `AURORA_SIDE` decides the side for this session.
     side_override: bool,
     startup: autostart::Status,
+    /// The registry disagrees with the saved start-up preference.
+    startup_mismatch: bool,
     version: &'static str,
     demo: bool,
 }
@@ -39,13 +41,15 @@ fn view(app: &AppHandle) -> SettingsView {
     let store = app.state::<Store>();
     let preferences = store.get();
     let (_, side_override) = crate::preferences::effective_side(&preferences);
+    let startup = startup_status();
     SettingsView {
         status: store.status(),
         side_override,
+        startup_mismatch: autostart::out_of_sync(startup, preferences.launch_at_startup),
         preferences,
         monitors: monitors::enumerate(),
         placement: windows::placement(app),
-        startup: startup_status(),
+        startup,
         version: env!("CARGO_PKG_VERSION"),
         demo: app.state::<Service>().is_demo(),
     }
@@ -63,8 +67,10 @@ pub fn set_preferences(app: AppHandle, preferences: Preferences) -> Result<Setti
     let preferences = preferences.validate()?;
     let store = app.state::<Store>();
     let previous = store.get();
+    // A change of the choice, or a registry that disagrees with it (for
+    // example after a restore that failed): saving applies it again.
     let startup_changes = preferences.launch_at_startup != previous.launch_at_startup
-        || (preferences.launch_at_startup && startup_status() != autostart::Status::Enabled);
+        || autostart::out_of_sync(startup_status(), preferences.launch_at_startup);
     if startup_changes {
         // The registry entry and the saved preference change together: a
         // failed save restores the entry as it was.

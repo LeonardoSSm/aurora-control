@@ -40,6 +40,8 @@ export interface SettingsView {
   placement: { monitor: string | null; fallback: boolean };
   sideOverride: boolean;
   startup: StartupStatus;
+  /** The registry disagrees with the saved start-up preference. */
+  startupMismatch: boolean;
   version: string;
   demo: boolean;
 }

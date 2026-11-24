@@ -49,7 +49,12 @@ function App() {
           // Showing or hiding Claude Code changes what may be diagnosed.
           recheck();
         },
-        (failure: unknown) => setError(message(failure)),
+        (failure: unknown) => {
+          setError(message(failure));
+          // A failed save may leave the registry changed: show what is
+          // actually stored rather than the state before the attempt.
+          void getSettings().then(setView, console.error);
+        },
       )
       .finally(() => setSaving(false));
   };

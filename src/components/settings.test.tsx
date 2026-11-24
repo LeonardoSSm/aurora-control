@@ -33,6 +33,7 @@ const view: SettingsView = {
   placement: { monitor: "m-00000000000000bb", fallback: true },
   sideOverride: false,
   startup: "disabled",
+  startupMismatch: false,
   version: "0.2.0",
   demo: false,
 };
@@ -136,6 +137,20 @@ describe("settings · status and diagnostics", () => {
   it("describes the start-up entry state", () => {
     expect(render({ startup: "otherLocation" })).toContain("outra cópia");
     expect(render({ startup: "enabled" })).toContain("Ativo");
+  });
+
+  it("never presents a registry that disagrees with the preference as in sync", () => {
+    expect(render()).not.toContain("Corrigir");
+    // A restore that failed left our entry while the preference is off.
+    const stale = render({ startup: "enabled", startupMismatch: true });
+    expect(stale).toContain("ainda tem a entrada deste aplicativo");
+    expect(stale).toContain("Corrigir");
+    const missing = render({
+      preferences: { ...view.preferences, launchAtStartup: true },
+      startup: "disabled",
+      startupMismatch: true,
+    });
+    expect(missing).toContain("o Windows não tem a entrada");
   });
 });
 

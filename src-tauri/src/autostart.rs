@@ -57,10 +57,18 @@ pub fn apply(key: &impl RunKey, exe: &Path, enabled: bool) -> io::Result<()> {
     }
 }
 
+/// Shown when the preferences could not be saved and the registry entry could
+/// not be put back either: the two now disagree, and the user must know.
+pub const OUT_OF_SYNC: &str = "As preferências não foram salvas e a entrada de inicialização com o \
+     Windows não pôde ser restaurada. O estado mostrado abaixo vem do registro; use \"Corrigir\" \
+     para alinhá-lo à preferência salva.";
+
 /// Applies the start-up choice, then runs `persist` (saving the
 /// preferences). If `persist` fails, the entry is restored exactly as it was
 /// before (including an entry of another copy), so the registry and the saved
-/// preference never disagree.
+/// preference never disagree. If even the restore fails, the error says so
+/// ([`OUT_OF_SYNC`]) instead of reporting the save failure alone; the
+/// settings window then shows the registry state and offers to reconcile.
 pub fn apply_then<T>(
     key: &impl RunKey,
     exe: &Path,
@@ -71,15 +79,34 @@ pub fn apply_then<T>(
         .read()
         .map_err(|error| format!("Inicialização com o Windows: {error}"))?;
     apply(key, exe, enabled).map_err(|error| format!("Inicialização com o Windows: {error}"))?;
-    persist().inspect_err(|_| {
+    persist().map_err(|failure| {
         let restored = match &before {
             Some(command) => key.write(command),
             None => key.delete(),
         };
-        if restored.is_err() {
-            eprintln!("Aurora Control: could not restore the start-up entry");
+        match restored {
+            Ok(()) => failure,
+            Err(error) => {
+                // Sanitized: the error kind only, no path or command line.
+                eprintln!(
+                    "Aurora Control: start-up entry not restored after a failed save ({:?})",
+                    error.kind()
+                );
+                OUT_OF_SYNC.to_owned()
+            }
         }
     })
+}
+
+/// Whether the registry disagrees with the saved preference for this copy.
+/// An entry of another copy is not this app's to remove, so it is reported
+/// (as `OtherLocation`) but never counted as a disagreement when disabled.
+pub fn out_of_sync(status: Status, enabled: bool) -> bool {
+    match status {
+        Status::Enabled => !enabled,
+        Status::Disabled | Status::OtherLocation => enabled,
+        Status::Unknown => false,
+    }
 }
 
 #[cfg(windows)]
@@ -193,6 +220,8 @@ mod tests {
     struct Fake {
         value: RefCell<Option<String>>,
         broken: bool,
+        /// Writes and deletes fail from now on (the key became read-only).
+        frozen: std::cell::Cell<bool>,
     }
 
     impl RunKey for Fake {
@@ -203,13 +232,60 @@ mod tests {
             Ok(self.value.borrow().clone())
         }
         fn write(&self, command: &str) -> io::Result<()> {
+            if self.frozen.get() {
+                return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+            }
             *self.value.borrow_mut() = Some(command.into());
             Ok(())
         }
         fn delete(&self) -> io::Result<()> {
+            if self.frozen.get() {
+                return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+            }
             *self.value.borrow_mut() = None;
             Ok(())
         }
+    }
+
+    #[test]
+    fn a_failed_restore_is_reported_as_out_of_sync() {
+        let exe = Path::new(r"C:\new\aurora-control.exe");
+        // Enabling: the save fails, then the key refuses the restore.
+        let key = Fake::default();
+        let result = apply_then(&key, exe, true, || {
+            key.frozen.set(true);
+            Err::<(), _>("disk full".to_string())
+        });
+        assert_eq!(
+            result,
+            Err(OUT_OF_SYNC.to_owned()),
+            "never a plain save error"
+        );
+        // The registry kept the new entry while the saved preference is off.
+        assert_eq!(status(&key, exe), Status::Enabled);
+        assert!(out_of_sync(status(&key, exe), false));
+
+        // Once the key is writable again, applying the saved choice heals it.
+        key.frozen.set(false);
+        assert_eq!(apply_then(&key, exe, false, || Ok(())), Ok(()));
+        assert!(!out_of_sync(status(&key, exe), false));
+    }
+
+    #[test]
+    fn disagreement_is_judged_for_this_copy_only() {
+        assert!(out_of_sync(Status::Enabled, false));
+        assert!(out_of_sync(Status::Disabled, true));
+        assert!(out_of_sync(Status::OtherLocation, true));
+        assert!(
+            !out_of_sync(Status::OtherLocation, false),
+            "not ours to remove"
+        );
+        assert!(!out_of_sync(Status::Enabled, true));
+        assert!(!out_of_sync(Status::Disabled, false));
+        assert!(
+            !out_of_sync(Status::Unknown, true),
+            "unknown is reported apart"
+        );
     }
 
     #[test]

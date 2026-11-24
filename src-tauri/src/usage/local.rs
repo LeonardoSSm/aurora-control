@@ -136,20 +136,19 @@ impl Budget {
     }
 }
 
-/// [`read_tail`] within a budget: counts one file and the bytes read.
+/// Reads the end of a file within a budget: counts one file and the bytes
+/// read. The file is opened and measured once (see `tail_of`).
 pub fn read_tail_within(path: &Path, max: u64, budget: &mut Budget) -> io::Result<Tail> {
     if !budget.file() {
         return Err(io::Error::other("read budget exhausted"));
     }
-    let length = std::fs::metadata(path)?.len();
+    let mut file = File::open(path)?;
+    let length = file.metadata()?.len();
     let granted = budget.bytes(length.min(max));
     if granted == 0 && length > 0 {
         return Err(io::Error::other("read budget exhausted"));
     }
-    Ok(Tail {
-        text: read_tail(path, granted)?,
-        cut: granted < length,
-    })
+    tail_of(&mut file, length, granted)
 }
 
 /// The end of a file, and whether its beginning was left out (by the
@@ -161,21 +160,35 @@ pub struct Tail {
 }
 
 /// Reads at most `max` bytes from the end of a file. When the read starts in
-/// the middle of the file, the first partial line is dropped.
-pub fn read_tail(path: &Path, max: u64) -> io::Result<String> {
+/// the middle of the file, the first partial line is dropped. Production
+/// reads go through [`read_tail_within`], which also charges the budget.
+#[cfg(test)]
+fn read_tail(path: &Path, max: u64) -> io::Result<Tail> {
     let mut file = File::open(path)?;
     let length = file.metadata()?.len();
+    tail_of(&mut file, length, max)
+}
+
+/// The last `max` bytes of the first `length` bytes of an open file. The file
+/// is measured once, by the caller: bytes appended afterwards (a transcript
+/// being written) are left for the next read instead of shifting the start,
+/// so `cut` always matches what was actually left out at the beginning.
+fn tail_of(file: &mut File, length: u64, max: u64) -> io::Result<Tail> {
     let start = length.saturating_sub(max);
     file.seek(SeekFrom::Start(start))?;
     let mut bytes = Vec::with_capacity(usize::try_from(length - start).unwrap_or(0).min(1 << 20));
-    file.take(max).read_to_end(&mut bytes)?;
+    file.take(length - start).read_to_end(&mut bytes)?;
     let text = String::from_utf8_lossy(&bytes);
-    Ok(if start > 0 {
+    let text = if start > 0 {
         text.split_once('\n')
             .map(|(_, rest)| rest.to_owned())
             .unwrap_or_default()
     } else {
         text.into_owned()
+    };
+    Ok(Tail {
+        text,
+        cut: start > 0,
     })
 }
 
@@ -245,10 +258,38 @@ mod tests {
     fn tail_drops_the_partial_first_line() {
         let dir = TempDir::new("tail");
         let path = dir.write("log.jsonl", "first line\nsecond\nthird\n");
-        assert_eq!(read_tail(&path, 13).unwrap(), "third\n");
+        let tail = read_tail(&path, 13).unwrap();
+        assert_eq!((tail.text.as_str(), tail.cut), ("third\n", true));
+        let whole = read_tail(&path, 1000).unwrap();
         assert_eq!(
-            read_tail(&path, 1000).unwrap(),
-            "first line\nsecond\nthird\n"
+            (whole.text.as_str(), whole.cut),
+            ("first line\nsecond\nthird\n", false)
+        );
+    }
+
+    /// A transcript appended to between the measurement and the read. The
+    /// baseline of b210572 measured twice: the start shifted by the appended
+    /// bytes, the first record was dropped and `cut` still said `false`.
+    #[test]
+    fn a_file_growing_during_the_read_keeps_its_start_and_cut_flag() {
+        use std::io::Write;
+        let dir = TempDir::new("growing");
+        let path = dir.write("t.jsonl", "first-in-window\nsecond\n");
+        let mut file = File::open(&path).unwrap();
+        let length = file.metadata().unwrap().len();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"third\n")
+            .unwrap();
+        let tail = tail_of(&mut file, length, 1 << 20).unwrap();
+        assert_eq!(tail.text, "first-in-window\nsecond\n");
+        assert!(!tail.cut);
+        // Read again later, the appended record is there.
+        assert_eq!(
+            read_tail(&path, 1 << 20).unwrap().text,
+            "first-in-window\nsecond\nthird\n"
         );
     }
 
