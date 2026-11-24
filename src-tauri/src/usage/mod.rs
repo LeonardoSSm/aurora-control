@@ -1,11 +1,19 @@
 //! Usage service: one background worker per provider adapter. Workers refresh
 //! on their own schedule; the IPC only reads the cached state, so hover and
 //! animations never wait for the network.
+//!
+//! Providers are isolated from each other: each one has its own adapter,
+//! tracker (cache, retry state and identity), refresh policy and worker
+//! thread. A failure, a panic or a long `Retry-After` of one provider never
+//! delays or alters another.
 
 mod adapter;
+pub mod catalog;
 mod claude;
 mod codex;
 mod demo;
+mod gemini;
+mod grok;
 mod http;
 mod local;
 mod model;
@@ -22,7 +30,12 @@ pub use adapter::UsageAdapter;
 #[cfg(test)]
 pub use local::testing;
 pub use local::{ReadError, read_limited};
-pub use model::{Diagnostics, Provider, Snapshot, Usage, UsageUpdate};
+#[cfg(test)]
+pub use model::{ConsumptionWindow, Quota};
+pub use model::{
+    Diagnostics, Issue, Provider, QuotaKind, Reading, Snapshot, Source, Usage, UsageUpdate,
+};
+pub use session::Fingerprint;
 
 use crate::sync::{lock, wait_timeout_while};
 use adapter::{FetchError, Outcome};
@@ -43,6 +56,16 @@ struct Slot {
     wake: Condvar,
 }
 
+/// What the alert engine sees of one provider: its published state, whether
+/// it is enabled, and the process-local identity of its verified account.
+/// Never serialized.
+#[derive(Clone, Debug)]
+pub struct Observation {
+    pub enabled: bool,
+    pub identity: Option<Fingerprint>,
+    pub usage: Usage,
+}
+
 pub struct Service {
     slots: Vec<Arc<Slot>>,
     /// Publication counter. Snapshots are taken while it is held, so a higher
@@ -52,25 +75,33 @@ pub struct Service {
 
 impl Service {
     pub fn new(adapters: Vec<Box<dyn UsageAdapter>>) -> Self {
-        Self::with_policy(adapters, Policy::default())
+        Self::build(adapters, Policy::for_provider)
     }
 
+    #[cfg(test)]
     fn with_policy(adapters: Vec<Box<dyn UsageAdapter>>, policy: Policy) -> Self {
+        Self::build(adapters, |_| policy)
+    }
+
+    fn build(adapters: Vec<Box<dyn UsageAdapter>>, policy: impl Fn(Provider) -> Policy) -> Self {
         let now = Now::current();
         Self {
             slots: adapters
                 .into_iter()
                 .map(|adapter| {
+                    let provider = adapter.provider();
                     Arc::new(Slot {
                         tracker: Mutex::new(Tracker::new(
-                            adapter.provider(),
+                            provider,
                             adapter.source(),
-                            policy,
+                            policy(provider),
                             now,
                         )),
                         adapter,
                         manual: Mutex::new(false),
-                        enabled: AtomicBool::new(true),
+                        // Until the preferences say otherwise, only the
+                        // providers enabled by default may read anything.
+                        enabled: AtomicBool::new(catalog::entry(provider).default_enabled),
                         wake: Condvar::new(),
                     })
                 })
@@ -92,6 +123,8 @@ impl Service {
             None => Self::new(vec![
                 Box::new(codex::Codex::detect()),
                 Box::new(claude::ClaudeCode::detect()),
+                Box::new(gemini::Gemini::detect()),
+                Box::new(grok::Grok::detect()),
             ]),
         }
     }
@@ -154,6 +187,34 @@ impl Service {
                 slot.wake.notify_one();
             }
         }
+    }
+
+    /// Chooses the ring's metric of each provider (`None`: automatic).
+    /// Presentation only: nothing is queried again.
+    pub fn select_metrics(&self, metrics: &[(Provider, Option<String>)]) {
+        for slot in &self.slots {
+            let provider = slot.adapter.provider();
+            if let Some((_, metric)) = metrics.iter().find(|(id, _)| *id == provider) {
+                lock(&slot.tracker).select_metric(metric.clone());
+            }
+        }
+    }
+
+    /// The state of every provider, for the alert engine. Built from the same
+    /// trackers as the published snapshot: no provider is queried for it.
+    pub fn observations(&self) -> Vec<Observation> {
+        let now = Now::current();
+        self.slots
+            .iter()
+            .map(|slot| {
+                let tracker = lock(&slot.tracker);
+                Observation {
+                    enabled: slot.enabled.load(Ordering::SeqCst),
+                    identity: tracker.identity(),
+                    usage: tracker.usage(now),
+                }
+            })
+            .collect()
     }
 
     /// The sign-in diagnosis of `provider`, with its latest issue.
