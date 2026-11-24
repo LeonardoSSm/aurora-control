@@ -1,11 +1,12 @@
 {
   "identifier": "settings",
-  "description": "A janela de configurações lê e grava preferências validadas, consulta o diagnóstico de autenticação de cada provedor e envia uma notificação de teste. Não recebe eventos nem comandos das sobreposições.",
+  "description": "A janela de configurações lê e grava preferências validadas, consulta o diagnóstico de autenticação de cada provedor, reativa por pedido explícito uma fonte suspensa pelo disjuntor de segurança e envia uma notificação de teste. Não recebe eventos nem comandos das sobreposições.",
   "windows": ["settings"],
   "permissions": [
     "allow-get-settings",
     "allow-set-preferences",
     "allow-get-diagnostics",
+    "allow-reset-provider-safety",
     "allow-send-test-notification"
   ]
 }

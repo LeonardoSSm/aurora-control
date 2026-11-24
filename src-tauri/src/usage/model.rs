@@ -26,12 +26,9 @@ impl Provider {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum BlockReason {
-    /// A source exists, but its terms of use could not be verified: the query
-    /// stays off until they are (Grok).
-    TermsUnverified,
-    /// The official CLI ran a model turn instead of answering a read-only
-    /// command: queries are suspended so the user's quota is never spent
-    /// (Antigravity).
+    /// The official CLI ran a model turn, or answered a read-only command in
+    /// a way that could not prove it did not: queries are suspended, across
+    /// restarts, until the user re-enables them (Antigravity).
     CliSafety,
 }
 
@@ -67,6 +64,10 @@ pub enum Origin {
     Cli,
     /// Rate-limit record written by the provider's own client to its local session log.
     SessionLog,
+    /// Account allowance the provider's official client fetched and wrote to
+    /// its own local log, tied to the signed-in account. Its time is the
+    /// client's fetch, not a query by this app (Grok Build).
+    ClientLog,
     Fixture,
 }
 
@@ -186,6 +187,10 @@ pub enum Issue {
     SourceBlocked {
         reason: BlockReason,
     },
+    /// The quota comes from a record the provider's own client writes, and
+    /// there is no current one for this account yet: using the client
+    /// (for example opening it, or its `/usage`) produces one.
+    AwaitingClient,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]

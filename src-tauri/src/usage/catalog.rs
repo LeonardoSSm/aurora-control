@@ -26,9 +26,10 @@ pub enum Integration {
     /// Reads real quota data through a read-only command of the provider's
     /// official CLI, in its documented non-interactive mode (Antigravity).
     Cli,
-    /// A quota source is implemented but switched off until its terms of use
-    /// are verified (see `docs/provider-compatibility.md`).
-    Gated,
+    /// Reads the allowance the provider's official client fetched and wrote
+    /// to its own local log; the app sends nothing to the provider (Grok
+    /// Build, for the allowance Grok and Cursor share).
+    ClientLog,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -107,7 +108,8 @@ mod tests {
             .collect();
         assert_eq!(enabled, [Provider::Codex, Provider::ClaudeCode]);
         assert_eq!(entry(Provider::Antigravity).integration, Integration::Cli);
-        assert_eq!(entry(Provider::Grok).integration, Integration::Gated);
+        assert_eq!(entry(Provider::Grok).integration, Integration::ClientLog);
+        assert_eq!(name(Provider::Grok), "Grok / Cursor");
         assert_eq!(name(Provider::ClaudeCode), "Claude Code");
     }
 }

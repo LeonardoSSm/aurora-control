@@ -1,0 +1,20 @@
+PASS  rail visible  hwnd 788952
+PASS  summary hidden at start  
+PASS  rail geometry  (1860,457) 60x118
+PASS  no-activate tool window  0x8000198
+PASS  cursor moved  (1914,483)
+PASS  summary opens on hover (cold)  1023 ms after the cursor arrived
+PASS  focus unchanged on hover  fg 11141608 pid 10284 overlay=False
+PASS  summary opens inward  (1556,348)-(1852,619)
+PASS  summary click-through  
+PASS  closes after leaving  343 ms after the cursor left
+PASS  summary opens on hover (warm)  187 ms after the cursor arrived
+PASS  sweep does not open  
+PASS  rail corner click-through  
+PASS  switch keeps the card open  
+PASS  focus unchanged after switch  fg 11141608 pid 10284 overlay=False
+PASS  controller batches traced  85 batches
+PASS  no re-entrant batch  
+PASS  single owner thread  
+PASS  batch latency  median 0,12 ms, max 142,29 ms
+Summary: 19/19 passed

@@ -144,6 +144,7 @@ function render(
       test="idle"
       onSave={vi.fn()}
       onDiagnose={vi.fn()}
+      onResetSafety={vi.fn()}
       onTestNotification={vi.fn()}
       {...extra}
     />,
@@ -229,10 +230,12 @@ describe("settings · providers", () => {
     expect(markup).toMatch(
       /aria-checked="false" aria-label="Mostrar Antigravity"/,
     );
-    expect(markup).toMatch(/aria-checked="false" aria-label="Mostrar Grok"/);
+    expect(markup).toMatch(
+      /aria-checked="false" aria-label="Mostrar Grok \/ Cursor"/,
+    );
     // Honest integration levels.
     expect(markup).toContain("Cotas reais pelo CLI oficial");
-    expect(markup).toContain("desativada até a verificação dos termos");
+    expect(markup).toContain("registro local do cliente oficial");
   });
 
   it("allows hiding every provider and explains the hidden rail", () => {
@@ -257,10 +260,10 @@ describe("settings · providers", () => {
     expect(markup).toContain("Desativado");
   });
 
-  it("explains a blocked quota source without asking for credentials", () => {
+  it("explains a missing client record without asking for credentials", () => {
     const grok: ProviderView = {
       ...providerView("grok"),
-      issue: { code: "sourceBlocked", reason: "termsUnverified" },
+      issue: { code: "awaitingClient" },
       account: "u•••@example.com",
       checkedAt: "2026-11-23T17:59:00Z",
     };
@@ -273,10 +276,35 @@ describe("settings · providers", () => {
         grok,
       ],
     });
-    expect(markup).toContain("Sessão detectada");
-    expect(markup).toContain("termos de uso da xAI");
+    expect(markup).toContain("Grok / Cursor");
+    expect(markup).toContain("Abra o Grok Build");
+    expect(markup).toContain("registro local do cliente oficial");
     // Never a credential value or a prompt for one.
     expect(markup).not.toMatch(/ya29.|Bearer|refresh_token|senha|cookie/i);
+  });
+
+  it("offers an informed reactivation of a source suspended for safety", () => {
+    const antigravity: ProviderView = {
+      ...providerView("antigravity"),
+      issue: { code: "sourceBlocked", reason: "cliSafety" },
+      checkedAt: "2026-11-23T17:59:00Z",
+    };
+    const markup = render({
+      preferences: updateProvider(preferences, "antigravity", {
+        enabled: true,
+      }),
+      providers: [
+        providerView("codex"),
+        claude,
+        antigravity,
+        providerView("grok"),
+      ],
+    });
+    expect(markup).toContain("Suspenso por segurança");
+    expect(markup).toContain("reativar a fonte nas configurações");
+    // The first step only opens the explanation; nothing is reset yet.
+    expect(markup).toContain("Reativar consultas…");
+    expect(markup).not.toContain("Reativar mesmo assim");
   });
 
   it("names the source of the data", () => {

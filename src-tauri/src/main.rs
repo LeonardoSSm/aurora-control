@@ -30,8 +30,8 @@ fn main() {
         .setup(|app| {
             let config =
                 preferences::debug_config_dir().or_else(|| app.path().app_config_dir().ok());
+            let service = usage::Service::from_environment(config.as_deref());
             app.manage(preferences::Store::load(config));
-            let service = usage::Service::from_environment();
             let demo = service.is_demo();
             app.manage(service);
             app.manage(alerts::Alerts::default());
@@ -55,6 +55,7 @@ fn main() {
             settings::get_settings,
             settings::set_preferences,
             settings::get_diagnostics,
+            settings::reset_provider_safety,
             alerts::send_test_notification,
         ])
         .run(tauri::generate_context!())
@@ -83,6 +84,7 @@ mod ipc_tests {
         "get_settings",
         "set_preferences",
         "get_diagnostics",
+        "reset_provider_safety",
         "send_test_notification",
     ];
 

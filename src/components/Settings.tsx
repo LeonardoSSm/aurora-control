@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { ReactNode } from "react";
 import {
   chooseMetric,
@@ -49,8 +50,8 @@ const startupNotes: Record<StartupStatus, string> = {
 const integrationNotes: Record<ProviderView["integration"], string> = {
   live: "Cotas reais da conta (mesmo endpoint do cliente oficial)",
   cli: "Cotas reais pelo CLI oficial (comando somente leitura)",
-  gated:
-    "Somente sessão local · consulta desativada até a verificação dos termos",
+  clientLog:
+    "Franquia lida do registro local do cliente oficial (nada é enviado ao provedor)",
 };
 
 export type TestState = "idle" | "sending" | "sent" | "failed";
@@ -105,7 +106,7 @@ function statusChip(provider: ProviderView, enabled: boolean, demo: boolean) {
   if (!enabled) return { label: "Desativado", state: "off" };
   if (demo) return { label: "Demonstração", state: "demo" };
   if (provider.issue?.code === "sourceBlocked")
-    return { label: "Sessão detectada", state: "info" };
+    return { label: "Suspenso por segurança", state: "warning" };
   switch (provider.status) {
     case "available":
       return { label: "Conectado", state: "ok" };
@@ -150,6 +151,7 @@ function ProviderCard({
   now,
   onSave,
   onDiagnose,
+  onResetSafety,
 }: {
   provider: ProviderView;
   preferences: Preferences;
@@ -159,6 +161,7 @@ function ProviderCard({
   now: Date;
   onSave: (preferences: Preferences) => void;
   onDiagnose: () => void;
+  onResetSafety: () => void;
 }) {
   const choice = preferences.providers[provider.id];
   const chip = statusChip(provider, choice.enabled, demo);
@@ -211,6 +214,13 @@ function ProviderCard({
             <p className="provider-issue">
               {issueText(provider.issue, provider.id, now)}
             </p>
+          )}
+          {provider.issue?.code === "sourceBlocked" && (
+            <SafetyReset
+              provider={provider}
+              saving={saving}
+              onConfirm={onResetSafety}
+            />
           )}
           {provider.origin && (
             <p className="provider-line">
@@ -305,6 +315,67 @@ function ProviderCard({
   );
 }
 
+/**
+ * Re-enabling a source suspended by its safety breaker takes two explicit
+ * steps, with the consequence spelled out before the second one.
+ */
+function SafetyReset({
+  provider,
+  saving,
+  onConfirm,
+}: {
+  provider: ProviderView;
+  saving: boolean;
+  onConfirm: () => void;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  if (!confirming) {
+    return (
+      <div className="settings-actions">
+        <button
+          type="button"
+          className="ghost"
+          disabled={saving}
+          onClick={() => setConfirming(true)}
+        >
+          Reativar consultas…
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div className="settings-hint settings-warning" role="alert">
+      <p>
+        O {provider.name} foi suspenso porque o CLI oficial executou, ou pode
+        ter executado, uma rodada do modelo ao ser consultado. Ao reativar, o
+        Aurora Control volta a executar o comando somente leitura do CLI; se
+        isso se repetir, a cota da sua conta pode ser consumida, e a fonte será
+        suspensa de novo. Atualize o CLI antes de reativar e confira o
+        diagnóstico abaixo.
+      </p>
+      <div className="settings-actions">
+        <button
+          type="button"
+          disabled={saving}
+          onClick={() => {
+            setConfirming(false);
+            onConfirm();
+          }}
+        >
+          Reativar mesmo assim
+        </button>
+        <button
+          type="button"
+          className="ghost"
+          onClick={() => setConfirming(false)}
+        >
+          Manter suspenso
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function ClockInput({
   id,
   label,
@@ -344,6 +415,7 @@ export function Settings({
   test,
   onSave,
   onDiagnose,
+  onResetSafety,
   onTestNotification,
 }: {
   view: SettingsView;
@@ -354,6 +426,7 @@ export function Settings({
   test: TestState;
   onSave: (preferences: Preferences) => void;
   onDiagnose: (provider: ProviderView["id"]) => void;
+  onResetSafety: (provider: ProviderView["id"]) => void;
   onTestNotification: () => void;
 }) {
   const preferences = view.preferences;
@@ -527,6 +600,7 @@ export function Settings({
               now={now}
               onSave={onSave}
               onDiagnose={() => onDiagnose(provider.id)}
+              onResetSafety={() => onResetSafety(provider.id)}
             />
           ))}
         </div>

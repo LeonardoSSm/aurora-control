@@ -127,6 +127,9 @@ export const setPreferences = (preferences: Preferences) =>
   invoke<SettingsView>("set_preferences", { preferences });
 export const getDiagnostics = (provider: Provider) =>
   invoke<Diagnostics | null>("get_diagnostics", { provider });
+/** Lifts the safety suspension of a CLI source, after the user confirmed. */
+export const resetProviderSafety = (provider: Provider) =>
+  invoke<Diagnostics | null>("reset_provider_safety", { provider });
 export const sendTestNotification = () =>
   invoke<void>("send_test_notification");
 

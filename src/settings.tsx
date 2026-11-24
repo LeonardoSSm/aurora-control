@@ -5,6 +5,7 @@ import type { TestState } from "./components/Settings";
 import {
   getDiagnostics,
   getSettings,
+  resetProviderSafety,
   sendTestNotification,
   setPreferences,
 } from "./desktop/settings";
@@ -71,6 +72,20 @@ function App() {
       .finally(() => setSaving(false));
   };
 
+  const resetSafety = (provider: Provider) => {
+    setSaving(true);
+    setError(null);
+    void resetProviderSafety(provider)
+      .then(
+        (result) => {
+          setDiagnostics((current) => ({ ...current, [provider]: result }));
+          void getSettings().then(setView, console.error);
+        },
+        (failure: unknown) => setError(message(failure)),
+      )
+      .finally(() => setSaving(false));
+  };
+
   const testNotification = () => {
     setTest("sending");
     void sendTestNotification().then(
@@ -99,6 +114,7 @@ function App() {
       test={test}
       onSave={save}
       onDiagnose={diagnose}
+      onResetSafety={resetSafety}
       onTestNotification={testNotification}
     />
   );

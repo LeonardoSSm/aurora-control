@@ -37,12 +37,12 @@
   },
   {
     "id": "grok",
-    "name": "Grok",
-    "vendor": "xAI",
+    "name": "Grok / Cursor",
+    "vendor": "xAI · Cursor",
     "defaultEnabled": false,
-    "refreshSeconds": 300,
-    "integration": "gated",
+    "refreshSeconds": 60,
+    "integration": "clientLog",
     "capabilities": ["subscriptionWindows", "credits", "diagnostics"],
-    "reconnect": "Entre novamente com “grok login”."
+    "reconnect": "Entre novamente com “grok login” e abra o Grok Build para atualizar a franquia."
   }
 ]

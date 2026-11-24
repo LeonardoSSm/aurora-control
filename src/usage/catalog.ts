@@ -5,7 +5,7 @@ import entries from "./catalog.json";
 export type Provider = "codex" | "claudeCode" | "antigravity" | "grok";
 
 /** How far the provider's data source goes (see docs/provider-compatibility.md). */
-export type Integration = "live" | "cli" | "gated";
+export type Integration = "live" | "cli" | "clientLog";
 
 export type Capability =
   | "subscriptionWindows"

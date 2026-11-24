@@ -140,12 +140,12 @@ body {
   stroke: color-mix(in srgb, var(--grok) 26%, transparent);
 }
 /* A discreet flag for a provider that needs attention, independent of the
-   provider's colors: amber for a problem, a hollow grey ring when the quota
-   source is blocked by design. */
+   provider's colors: amber for a problem, a hollow grey ring while the quota
+   comes from the official client's own record and it has not written one. */
 .ring-flag {
   fill: var(--warning);
 }
-.indicator[data-flag="blocked"] .ring-flag {
+.indicator[data-flag="waiting"] .ring-flag {
   fill: none;
   stroke: var(--muted);
   stroke-width: 1.2;

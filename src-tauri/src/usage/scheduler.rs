@@ -336,7 +336,8 @@ impl Tracker {
             | FetchError::Unsupported
             | FetchError::CredentialsUnavailable
             | FetchError::CredentialsInvalid
-            | FetchError::SourceBlocked(_) => (policy.local_recheck, policy.manual_gap, None),
+            | FetchError::SourceBlocked(_)
+            | FetchError::AwaitingClient => (policy.local_recheck, policy.manual_gap, None),
             // The request never got an answer: retrying soon is harmless.
             FetchError::Network | FetchError::Timeout => (backoff, policy.manual_gap, None),
             // The same credential fails again: the user waits like the
@@ -386,6 +387,7 @@ impl Tracker {
             FetchError::Malformed(_) => Issue::Malformed,
             FetchError::Http { status, .. } => Issue::Http { status, retry_at },
             FetchError::SourceBlocked(reason) => Issue::SourceBlocked { reason },
+            FetchError::AwaitingClient => Issue::AwaitingClient,
         });
     }
 
@@ -411,7 +413,9 @@ impl Tracker {
             // CLI) is only trusted as the result of the latest attempt: after
             // a failure it may belong to an account the user has left. Local
             // logs and fixtures are shown as unattributed history.
-            (_, None) => !matches!(good.origin, Origin::Api | Origin::Cli) || self.latest,
+            (_, None) => {
+                !matches!(good.origin, Origin::Api | Origin::Cli | Origin::ClientLog) || self.latest
+            }
         }
     }
 
@@ -1338,7 +1342,7 @@ mod tests {
                 session: account("A"),
                 account: Some("a•••@example.com".into()),
                 ..Outcome::failed(FetchError::SourceBlocked(
-                    crate::usage::model::BlockReason::TermsUnverified,
+                    crate::usage::model::BlockReason::CliSafety,
                 ))
             },
             at(0),
@@ -1348,7 +1352,7 @@ mod tests {
         assert_eq!(
             usage.issue,
             Some(Issue::SourceBlocked {
-                reason: crate::usage::model::BlockReason::TermsUnverified
+                reason: crate::usage::model::BlockReason::CliSafety
             })
         );
         assert_eq!(usage.account.as_deref(), Some("a•••@example.com"));

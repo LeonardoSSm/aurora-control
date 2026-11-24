@@ -141,7 +141,8 @@ try {
 
     $run = Start-App
     $ui = Invoke-Page 'return state();'
-    Check 'window: version and defaults' ($ui.version -eq 'v0.3.1' -and $ui.side -eq 'Direita' -and $ui.startup -eq 'false' -and $ui.codex -eq 'true') ("{0} {1} startup={2}" -f $ui.version, $ui.side, $ui.startup)
+    $expectedVersion = 'v' + (Get-Content (Join-Path $PSScriptRoot '..\package.json') -Raw | ConvertFrom-Json).version
+    Check 'window: version and defaults' ($ui.version -eq $expectedVersion -and $ui.side -eq 'Direita' -and $ui.startup -eq 'false' -and $ui.codex -eq 'true') ("{0} {1} startup={2}" -f $ui.version, $ui.side, $ui.startup)
 
     # Side through the UI: saved and applied live.
     $ui = Invoke-Page 'button("Esquerda").click(); await settled(); return state();'

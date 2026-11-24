@@ -4,7 +4,7 @@ import type { Provider } from "./catalog";
 
 export type { Provider } from "./catalog";
 export { providerNames, providers } from "./catalog";
-export type Origin = "api" | "cli" | "sessionLog" | "fixture";
+export type Origin = "api" | "cli" | "sessionLog" | "clientLog" | "fixture";
 export type QuotaKind = "window" | "credits";
 
 export interface Quota {
@@ -50,14 +50,15 @@ export type Issue =
         | "unsupported"
         | "network"
         | "timeout"
-        | "malformed";
+        | "malformed"
+        | "awaitingClient";
     }
   | { code: "rateLimited"; retryAt: string | null }
   | { code: "http"; status: number; retryAt: string | null }
   | { code: "sourceBlocked"; reason: BlockReason };
 
 /** Why a provider has no quota source this app may use. */
-export type BlockReason = "termsUnverified" | "cliSafety";
+export type BlockReason = "cliSafety";
 
 type Reading =
   | { status: "available" | "stale"; percentUsed: number }

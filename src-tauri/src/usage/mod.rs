@@ -14,9 +14,12 @@ mod claude;
 mod codex;
 mod demo;
 mod grok;
+mod grok_log;
 mod http;
 mod local;
 mod model;
+mod process;
+mod safety;
 mod scheduler;
 mod session;
 mod time;
@@ -110,8 +113,9 @@ impl Service {
         }
     }
 
-    /// Live adapters, or the fixture when `AURORA_DEMO` is set.
-    pub fn from_environment() -> Self {
+    /// Live adapters, or the fixture when `AURORA_DEMO` is set. `config` is
+    /// the app's configuration folder (safety breakers are kept there).
+    pub fn from_environment(config: Option<&std::path::Path>) -> Self {
         let demo = std::env::var("AURORA_DEMO").ok();
         match demo::DemoAdapter::from_env(demo.as_deref()) {
             Some(adapters) => Self::new(
@@ -123,10 +127,27 @@ impl Service {
             None => Self::new(vec![
                 Box::new(codex::Codex::detect()),
                 Box::new(claude::ClaudeCode::detect()),
-                Box::new(antigravity::Antigravity::detect()),
+                Box::new(antigravity::Antigravity::detect(config)),
                 Box::new(grok::Grok::detect()),
             ]),
         }
+    }
+
+    /// Lifts the safety suspension of `provider` at the user's explicit
+    /// request, and refreshes it at once if it is enabled.
+    pub fn reset_safety(&self, provider: Provider) -> Result<bool, String> {
+        let slot = self
+            .slots
+            .iter()
+            .find(|slot| slot.adapter.provider() == provider)
+            .ok_or_else(|| "Provedor desconhecido.".to_string())?;
+        let lifted = guarded(|| slot.adapter.reset_safety())
+            .unwrap_or_else(|| Err("Falha ao reativar a fonte.".into()))?;
+        if lifted && slot.enabled.load(Ordering::SeqCst) {
+            *lock(&slot.manual) = true;
+            slot.wake.notify_one();
+        }
+        Ok(lifted)
     }
 
     pub fn is_demo(&self) -> bool {
