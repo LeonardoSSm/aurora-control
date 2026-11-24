@@ -4,7 +4,7 @@ O Aurora Control mostra, na lateral da tela, quanto da cota de cada ferramenta d
 
 ## Instalação
 
-1. Baixe `Aurora Control_1.0.0_x64-setup.exe` da página da versão e confira o SHA-256 publicado:
+1. Baixe `Aurora.Control_1.0.0_x64-setup.exe` (o GitHub troca o espaço do nome por ponto) e `SHA256SUMS.txt` da página da versão, e confira o SHA-256:
 
    ```powershell
    Get-FileHash ".\Aurora Control_1.0.0_x64-setup.exe" -Algorithm SHA256
