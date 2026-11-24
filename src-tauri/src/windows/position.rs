@@ -17,6 +17,10 @@ pub const SLIDE: u8 = (INDICATOR_RADIUS + EXPANDED_INSET) as u8;
 pub const INDICATOR_GAP: i32 = 14;
 pub const INDICATOR_STEP: i32 = INDICATOR_DIAMETER + INDICATOR_GAP;
 pub const RAIL_WIDTH: i32 = SLIDE as i32 + INDICATOR_RADIUS + 2;
+/// Most indicators the rail can hold: one per catalog provider.
+pub const MAX_INDICATORS: usize = crate::usage::Provider::ALL.len();
+/// Slide offset of each indicator slot, from the top. Unused slots stay 0.
+pub type Shifts = [u8; MAX_INDICATORS];
 #[cfg(test)]
 pub const RAIL_HEIGHT: i32 = INDICATOR_STEP + INDICATOR_DIAMETER;
 /// The Win32 region extends past the drawn circle, so its aliased edge falls on
@@ -27,7 +31,7 @@ pub const SUMMARY_MIN_HEIGHT: i32 = 120;
 pub const SUMMARY_MAX_HEIGHT: i32 = 360;
 const SUMMARY_GAP: i32 = 8;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Rect {
     pub x: i32,
     pub y: i32,
@@ -68,7 +72,7 @@ pub fn anchor(index: usize) -> i32 {
 impl Layout {
     /// Circle bounds in window coordinates for each slide offset, padded for
     /// the region. Collapsed circles are centered on the screen edge.
-    pub fn indicator_circles(&self, shifts: [u8; 2]) -> [Rect; 2] {
+    pub fn indicator_circles(&self, shifts: Shifts) -> [Rect; MAX_INDICATORS] {
         std::array::from_fn(|index| {
             let shift = i32::from(shifts[index].min(SLIDE));
             let center_x = match self.side {
@@ -96,7 +100,7 @@ impl Layout {
     }
 
     /// The circles of the visible indicators, for the window region.
-    pub fn visible_circles(&self, shifts: [u8; 2]) -> Vec<Rect> {
+    pub fn visible_circles(&self, shifts: Shifts) -> Vec<Rect> {
         self.indicator_circles(shifts)
             .into_iter()
             .take(self.slots)
@@ -106,7 +110,7 @@ impl Layout {
     /// The input shape of one indicator on screen, for the slide offsets of
     /// the last frame Windows accepted: the same ellipse as the window region,
     /// clipped to the rail window. Transparent corners are outside (audit I04).
-    pub fn indicator_shape(&self, index: usize, shifts: [u8; 2]) -> Shape {
+    pub fn indicator_shape(&self, index: usize, shifts: Shifts) -> Shape {
         let circle = self.indicator_circles(shifts)[index];
         Shape::Ellipse {
             bounds: Rect {
@@ -121,7 +125,7 @@ impl Layout {
     /// Screen area that keeps a hovered indicator open: the indicator as
     /// drawn in the accepted frame, the summary card and the bridge between
     /// them at the height of the circle.
-    pub fn hover_zone(&self, index: usize, shifts: [u8; 2], summary: Option<Rect>) -> Zone {
+    pub fn hover_zone(&self, index: usize, shifts: Shifts, summary: Option<Rect>) -> Zone {
         let circle = self.indicator_shape(index, shifts);
         let mut shapes = vec![circle];
         if let (Some(summary), Shape::Ellipse { bounds, .. }) =
@@ -189,7 +193,24 @@ fn pixels(logical: i32, scale: f64) -> i32 {
 // `summary_height` are logical.
 /// Height of the rail for `slots` visible indicators, in logical pixels.
 pub fn rail_height(slots: usize) -> i32 {
-    slots.clamp(1, 2) as i32 * INDICATOR_STEP - INDICATOR_GAP
+    slots.clamp(1, MAX_INDICATORS) as i32 * INDICATOR_STEP - INDICATOR_GAP
+}
+
+/// How many indicators fit, with their regular spacing, in a work area of
+/// `work_height` physical pixels. At least one: a tiny work area shows the
+/// first indicator, clipped to the area, rather than none. Indicators past
+/// the capacity are not drawn (the first ones in catalog order are kept);
+/// the window never extends past the work area. Four indicators need 250
+/// logical pixels, so this only matters on very small or very scaled screens.
+pub fn capacity(work_height: i32, scale: f64) -> usize {
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    let logical = (f64::from(work_height.max(0)) / scale).floor() as i32;
+    let fit = (logical + INDICATOR_GAP) / INDICATOR_STEP;
+    usize::try_from(fit.max(1)).unwrap_or(1).min(MAX_INDICATORS)
 }
 
 /// [`layout_with`] for both indicators.
@@ -206,7 +227,10 @@ pub fn layout_with(
     anchor: i32,
     summary_height: i32,
 ) -> Layout {
-    let slots = slots.clamp(1, 2);
+    // Zero visible indicators hide the rail before any layout is taken.
+    let slots = slots
+        .clamp(1, MAX_INDICATORS)
+        .min(capacity(work.height, scale));
     let rail_width = pixels(RAIL_WIDTH, scale).min(work.width);
     let rail_height = pixels(rail_height(slots), scale).min(work.height);
     let right = work.x + work.width;
@@ -332,7 +356,8 @@ mod tests {
             height: 100,
         };
         let result = layout(work, 1.0, Side::Right, anchor(1), 180);
-        assert_eq!(result.rail.y, 40);
+        // 100 px fit one indicator (capacity), centered: no clipped second circle.
+        assert_eq!((result.rail.y, result.rail.height), (64, 52));
         assert_eq!(
             result.summary,
             Rect {
@@ -348,8 +373,8 @@ mod tests {
 
     #[test]
     fn collapsed_circles_are_centered_on_the_edge_and_mirrored() {
-        let right = layout(WORK, 1.0, Side::Right, 0, 0).indicator_circles([0, SLIDE]);
-        let left = layout(WORK, 1.0, Side::Left, 0, 0).indicator_circles([0, SLIDE]);
+        let right = layout(WORK, 1.0, Side::Right, 0, 0).indicator_circles([0, SLIDE, 0, 0]);
+        let left = layout(WORK, 1.0, Side::Left, 0, 0).indicator_circles([0, SLIDE, 0, 0]);
         // Collapsed: the center sits on the edge, so exactly half is inside.
         assert_eq!(
             right[0],
@@ -399,7 +424,7 @@ mod tests {
 
     #[test]
     fn circles_scale_with_dpi() {
-        let circles = layout(WORK, 1.5, Side::Right, 0, 0).indicator_circles([0, 0]);
+        let circles = layout(WORK, 1.5, Side::Right, 0, 0).indicator_circles([0; MAX_INDICATORS]);
         assert_eq!(circles[0].width, 81);
         assert_eq!(circles[0].x + circles[0].width / 2, 90);
         assert_eq!(circles[1].y, pixels(INDICATOR_STEP - 1, 1.5));
@@ -408,7 +433,7 @@ mod tests {
     #[test]
     fn hover_zone_bridges_the_circle_and_the_summary() {
         let result = layout(WORK, 1.0, Side::Right, anchor(0), 180);
-        let expanded = [SLIDE, 0];
+        let expanded = [SLIDE, 0, 0, 0];
         let zone = result.hover_zone(0, expanded, Some(result.summary));
         // Gap between the summary's right edge and the expanded circle.
         assert!(zone.contains(1855, result.rail.y + 26));
@@ -417,7 +442,7 @@ mod tests {
         assert!(!zone.contains(1855, 380));
         // The neighbor indicator is not part of the zone.
         assert!(!zone.contains(1900, result.rail.y + INDICATOR_STEP + 26));
-        let alone = result.hover_zone(1, [0, 0], None);
+        let alone = result.hover_zone(1, [0; MAX_INDICATORS], None);
         assert!(alone.contains(1900, result.rail.y + INDICATOR_STEP + 26));
         assert!(!alone.contains(1900, result.rail.y + 26));
     }
@@ -429,7 +454,7 @@ mod tests {
                 let result = layout(WORK, scale, side, anchor(0), 180);
                 let rail = result.rail;
                 // Expanded circle: its bounding box corner is not the circle.
-                let shape = result.indicator_shape(0, [SLIDE, 0]);
+                let shape = result.indicator_shape(0, [SLIDE, 0, 0, 0]);
                 let Shape::Ellipse { bounds, .. } = shape else {
                     unreachable!()
                 };
@@ -442,7 +467,7 @@ mod tests {
                 );
                 // Mid-animation (or collapsed), the zone follows the accepted
                 // frame, not the final expanded position.
-                let collapsed = result.hover_zone(0, [0, 0], None);
+                let collapsed = result.hover_zone(0, [0; MAX_INDICATORS], None);
                 let expanded_center = center;
                 assert!(
                     !collapsed.contains(expanded_center.0, expanded_center.1),
@@ -482,16 +507,16 @@ mod slot_tests {
         assert_eq!(rail_height(1), INDICATOR_DIAMETER);
         let one = layout_with(WORK, 1.25, Side::Right, 1, anchor(0), 180);
         assert_eq!(one.rail.height, 65);
-        assert_eq!(one.visible_circles([0, 0]).len(), 1);
+        assert_eq!(one.visible_circles([0; MAX_INDICATORS]).len(), 1);
         assert_eq!(
             layout_with(WORK, 1.0, Side::Left, 2, 0, 0)
-                .visible_circles([0, 0])
+                .visible_circles([0; MAX_INDICATORS])
                 .len(),
             2
         );
         // Out-of-range counts are clamped.
         assert_eq!(layout_with(WORK, 1.0, Side::Left, 0, 0, 0).rail.height, 52);
-        assert_eq!(layout_with(WORK, 1.0, Side::Left, 9, 0, 0).rail.height, 118);
+        assert_eq!(layout_with(WORK, 1.0, Side::Left, 9, 0, 0).rail.height, 250);
     }
 
     #[test]
@@ -499,8 +524,99 @@ mod slot_tests {
         let narrow = Rect { width: 40, ..WORK };
         let result = layout_with(narrow, 1.0, Side::Right, 2, 0, 0);
         assert_eq!(result.rail.width, 40);
-        let circle = result.indicator_circles([0, 0])[0];
+        let circle = result.indicator_circles([0; MAX_INDICATORS])[0];
         // Collapsed: the circle center sits on the window's right edge.
         assert_eq!(circle.x + circle.width / 2, result.rail.width);
+    }
+
+    #[test]
+    fn one_to_four_indicators_are_centered_and_evenly_spaced() {
+        for scale in [1.0, 1.25, 1.5] {
+            for side in [Side::Left, Side::Right] {
+                for slots in 1..=MAX_INDICATORS {
+                    let result = layout_with(WORK, scale, side, slots, 0, 0);
+                    // Vertically centered in the work area.
+                    let above = result.rail.y - WORK.y;
+                    let below = WORK.y + WORK.height - (result.rail.y + result.rail.height);
+                    assert!((above - below).abs() <= 1, "{scale} {side:?} {slots}");
+                    assert_eq!(result.rail.height, pixels(rail_height(slots), scale));
+                    // One region circle per visible indicator, evenly spaced.
+                    let circles = result.visible_circles([0; MAX_INDICATORS]);
+                    assert_eq!(circles.len(), slots);
+                    for pair in circles.windows(2) {
+                        let step = pair[1].y - pair[0].y;
+                        assert!((step - pixels(INDICATOR_STEP, scale)).abs() <= 1);
+                    }
+                    // Every circle stays inside the rail window.
+                    for circle in &circles {
+                        // The region pad (1 logical px) may round to 2 physical px.
+                        assert!(
+                            circle.y >= -2 && circle.y + circle.height <= result.rail.height + 2
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn each_indicator_slides_on_its_own() {
+        let result = layout_with(WORK, 1.0, Side::Right, 4, 0, 0);
+        let collapsed = result.indicator_circles([0; MAX_INDICATORS]);
+        let third = result.indicator_circles([0, 0, SLIDE, 0]);
+        for index in [0, 1, 3] {
+            assert_eq!(collapsed[index], third[index]);
+        }
+        assert_eq!(third[2].x, collapsed[2].x - i32::from(SLIDE));
+        // Mirrored on the left.
+        let left = layout_with(WORK, 1.0, Side::Left, 4, 0, 0);
+        let moved = left.indicator_circles([0, 0, 0, SLIDE])[3];
+        assert_eq!(
+            moved.x,
+            left.indicator_circles([0; MAX_INDICATORS])[3].x + i32::from(SLIDE)
+        );
+    }
+
+    #[test]
+    fn secondary_monitors_with_negative_origins_keep_the_rail_on_screen() {
+        let secondary = Rect {
+            x: -1920,
+            y: -300,
+            width: 1920,
+            height: 1080,
+        };
+        for side in [Side::Left, Side::Right] {
+            let result = layout_with(secondary, 1.25, side, 4, anchor(3), 200);
+            assert!(result.rail.x >= secondary.x);
+            assert!(result.rail.x + result.rail.width <= secondary.x + secondary.width);
+            assert!(result.rail.y >= secondary.y);
+            assert!(result.rail.y + result.rail.height <= secondary.y + secondary.height);
+            assert!(result.summary.y >= secondary.y);
+            assert!(result.summary.y + result.summary.height <= secondary.y + secondary.height);
+            // The summary of the last indicator faces inward.
+            match side {
+                Side::Left => assert!(result.summary.x >= result.rail.x + result.rail.width),
+                Side::Right => assert!(result.summary.x + result.summary.width <= result.rail.x),
+            }
+        }
+    }
+
+    #[test]
+    fn a_short_work_area_shows_only_the_indicators_that_fit() {
+        assert_eq!(capacity(1040, 1.0), 4);
+        // 250 logical pixels fit four exactly; one less fits three.
+        assert_eq!(capacity(250, 1.0), 4);
+        assert_eq!(capacity(249, 1.0), 3);
+        assert_eq!(capacity(375, 1.5), 4);
+        assert_eq!(capacity(374, 1.5), 3);
+        assert_eq!(capacity(10, 1.0), 1);
+        assert_eq!(capacity(0, f64::NAN), 1);
+        let short = Rect {
+            height: 200,
+            ..WORK
+        };
+        let result = layout_with(short, 1.0, Side::Right, 4, 0, 0);
+        assert_eq!(result.visible_circles([0; MAX_INDICATORS]).len(), 3);
+        assert!(result.rail.height <= short.height);
     }
 }
