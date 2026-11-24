@@ -439,6 +439,10 @@ fn apply_preferences(app: &AppHandle) -> tauri::Result<()> {
     // A new ring metric changes what the snapshot shows without any new
     // reading: publish it now instead of at the next refresh.
     usage_changed(app);
+    // A disabled worker publishes nothing, so the alert engine learns about
+    // a newly disabled provider here: it drops that provider's state, and a
+    // later re-enable starts from a fresh baseline.
+    crate::alerts::evaluate(app);
     Ok(())
 }
 

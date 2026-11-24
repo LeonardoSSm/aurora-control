@@ -10,7 +10,7 @@ Módulo `src-tauri/src/alerts/`, versão 0.3.0.
 
 ## Fonte dos dados
 
-O motor consome `Service::observations()`: o mesmo estado dos `Tracker` que a barra exibe, mais a habilitação do provedor e a identidade da conta verificada (`Fingerprint`, válida só neste processo). Ele **nunca consulta um provedor**: não há requisição criada para gerar alertas. A avaliação roda no callback dos workers, depois de `usage-updated`, com o lock do motor mantido durante a leitura das observações. Assim, publicações de threads diferentes são avaliadas uma de cada vez, sempre com o estado mais novo.
+O motor consome `Service::observations()`: o mesmo estado dos `Tracker` que a barra exibe, mais a habilitação do provedor e a identidade da conta verificada (`Fingerprint`, válida só neste processo). As observações usam a **métrica automática** (`Tracker::automatic_usage`): a métrica escolhida para o indicador é só apresentação, então uma métrica escolhida ausente ou renovada não silencia os alertas das outras janelas medidas. O motor **nunca consulta um provedor**: não há requisição criada para gerar alertas. A avaliação roda no callback dos workers, depois de `usage-updated`, e também ao aplicar preferências. Um provedor desativado não tem worker publicando, então é assim que o motor fica sabendo da desativação. O lock do motor é mantido durante a leitura das observações, então publicações de threads diferentes são avaliadas uma de cada vez, sempre com o estado mais novo.
 
 ## Regras
 
@@ -60,7 +60,7 @@ Um alerta por transição. O mesmo problema em cada nova tentativa não notifica
 - Leituras sem conta verificada (sessão `Unverified`, registro local do Codex) não disparam alertas de consumo.
 - Leituras desatualizadas (`stale`), com `issue`, repetidas ou mais antigas que a última processada são ignoradas.
 - Dados de demonstração (`source: demo`) nunca geram alertas. A notificação de teste é explicitamente identificada como teste.
-- Provedor desabilitado: estado descartado e nenhum alerta. Ao reabilitar, recomeça pela linha de base.
+- Provedor desabilitado: estado descartado (a aplicação das preferências avalia o motor na hora) e nenhum alerta. Ao reabilitar, recomeça pela linha de base.
 - Notificações desligadas (globalmente ou no provedor): o estado continua avançando, para nada ser reproduzido depois.
 
 ## Persistência

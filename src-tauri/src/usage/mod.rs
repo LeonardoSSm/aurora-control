@@ -211,7 +211,8 @@ impl Service {
                 Observation {
                     enabled: slot.enabled.load(Ordering::SeqCst),
                     identity: tracker.identity(),
-                    usage: tracker.usage(now),
+                    // Independent of the ring metric (a presentation choice).
+                    usage: tracker.automatic_usage(now),
                 }
             })
             .collect()

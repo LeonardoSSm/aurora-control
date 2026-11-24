@@ -449,7 +449,19 @@ impl Tracker {
         wake
     }
 
+    /// The state shown by the rail, with the user's ring metric.
     pub fn usage(&self, now: Now) -> Usage {
+        self.view(now, self.metric.as_deref())
+    }
+
+    /// The same state with the automatic metric. The ring metric is a
+    /// presentation choice: whether the data is fresh and which windows were
+    /// measured must not depend on it, so the alert engine reads this view.
+    pub fn automatic_usage(&self, now: Now) -> Usage {
+        self.view(now, None)
+    }
+
+    fn view(&self, now: Now, selected: Option<&str>) -> Usage {
         let good = self.shown();
         let quotas: Vec<Quota> = good
             .map(|good| {
@@ -461,7 +473,6 @@ impl Tracker {
             .unwrap_or_default();
         // With data in hand, a chosen metric that is absent is reported as
         // missing. Without any data, nothing can be said about it yet.
-        let selected = self.metric.as_deref();
         let has_data = !quotas.is_empty();
         let (primary, quotas) = split_metric(quotas, selected);
         let metric_missing = selected.is_some() && has_data && primary.is_none();
@@ -1353,5 +1364,38 @@ mod tests {
                 crate::usage::catalog::refresh_interval(provider)
             );
         }
+    }
+
+    #[test]
+    fn the_alert_view_ignores_the_ring_metric() {
+        let mut tracker = tracker();
+        tracker.begin(at(0));
+        tracker.finish(ok(fetched(73, t0(), Origin::Api)), at(1));
+
+        // A chosen metric that vanished makes the ring show nothing...
+        tracker.select_metric(Some("sevenDayOpus".into()));
+        assert_eq!(tracker.usage(at(2)).reading, Reading::Unavailable);
+        // ...but the reading is still fresh and fully measured for alerts.
+        let view = tracker.automatic_usage(at(2));
+        assert_eq!(view.reading, Reading::Available { percent_used: 73 });
+        assert!(!view.metric_missing);
+        assert_eq!(view.quotas.len(), 1);
+
+        // A chosen window that renewed (60 s after the reading, well within
+        // its freshness): the ring awaits a reading, while the other window
+        // is still a fresh measurement for alerts.
+        let mut early = fetched(73, t0(), Origin::Api);
+        early.quotas[0].resets_at = Some(rfc3339(t0() + secs(60)));
+        let mut renewing = Tracker::new(Provider::Codex, Source::Live, Policy::default(), at(0));
+        renewing.begin(at(0));
+        renewing.finish(ok(early), at(1));
+        renewing.select_metric(Some("fiveHour".into()));
+        assert!(matches!(
+            renewing.usage(at(120)).reading,
+            Reading::Stale { .. }
+        ));
+        let view = renewing.automatic_usage(at(120));
+        assert_eq!(view.reading, Reading::Available { percent_used: 73 });
+        assert_eq!(view.window.unwrap().id, "sevenDay");
     }
 }
