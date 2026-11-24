@@ -1,0 +1,91 @@
+Aurora Control 0.2.0 - closing validation of cycle 02 (2026-11-23/24)
+Windows 11 Pro 26300, one monitor 1920x1080 at 96 DPI, Node 24.15.0.
+Builds: npm run desktop:debug / npm run desktop:build at the closing commit.
+
+== Defects reproduced before fixing (temporary tests, removed afterwards) ==
+
+1. Transcript growing between measurement and read (read_tail_within at b210572):
+   steps: metadata -> append "third\n" -> read_tail(path, granted)
+   result at b210572: cut=false text="second\nthird\n"
+   -> the first record ("first-in-window") was lost while cut said false.
+   now: local::tests::a_file_growing_during_the_read_keeps_its_start_and_cut_flag passes.
+
+2. Recent transcript that cannot be opened: silently skipped, total shown as complete.
+   now: claude::truncation_tests::an_unreadable_recent_transcript_is_partial passes;
+   with the fix removed (mutation) the same test fails at claude.rs:1239.
+
+3. Hidden provider worker: sleep_for(enabled=true, overdue) = 250 ms, so a hidden
+   provider with an overdue refresh woke 4 times per second without reading.
+   now: usage::tests::a_hidden_worker_with_an_overdue_refresh_sleeps_instead_of_spinning.
+
+4. Hidden provider worker reads nothing until shown again:
+   usage::tests::a_hidden_worker_reads_nothing_until_shown_again passes;
+   with the enabled check removed (mutation) it fails at mod.rs:496.
+
+5. Rollback of the Run value that itself fails: before, only an eprintln and the
+   plain save error reached the user.
+   now: autostart::tests::a_failed_restore_is_reported_as_out_of_sync and
+   autostart::tests::disagreement_is_judged_for_this_copy_only pass.
+
+== scripts/validate-settings-ui.ps1 (debug build, AURORA_DEMO=73,25, DevTools on 127.0.0.1) ==
+PASS  window: version and defaults  v0.2.0 Direita startup=false
+PASS  ui side: saved
+PASS  ui side: rail moved live  x 0
+PASS  ui provider: saved hidden
+PASS  ui provider: single circle  height 52
+PASS  ui provider: last one locked
+PASS  startup on: Run value  "<repo>\src-tauri\target\debug\aurora-control.exe"
+PASS  startup on: saved and shown
+PASS  failed save: error shown  Acesso negado. (os error 5)
+PASS  failed save: Run value restored
+PASS  failed save: preference unchanged
+PASS  failed save: window shows stored state
+PASS  failed save: no temporary file left
+PASS  mismatch: reported  A preferência está ativa, mas o Windows não tem a entrada deste aplicativo.Corrigir
+PASS  mismatch: fixed
+PASS  startup off: Run value removed
+PASS  startup off: saved
+PASS  restart: rail on the saved side  x 0
+PASS  restart: single circle kept  height 52
+PASS  restart: window shows saved choices
+PASS  ui provider: shown again  height 118
+PASS  cleanup: Run value as before
+Summary: 22/22 passed
+After the run: no "Aurora Control" Run value, no preferences folder (both absent before).
+
+First runs: 21/22. "window: version and defaults" read an empty page: the first
+DevTools evaluation landed in the document replaced by the initial navigation and
+the CDP error reply was printed as null by the helper. The helper now fails on
+any CDP error and retries only "context was destroyed". Script defect, not app.
+
+== scripts/validate-overlay.ps1 ==
+right: 19/19 (cold open 1207 ms, warm 203 ms, close 489 ms, 82 batches, max 242.60 ms)
+left:  19/19 (cold open  893 ms, warm 201 ms, close 364 ms, 82 batches, max 146.57 ms)
+
+== scripts/validate-settings.ps1 ==
+15/15 (defaults, single instance, saved side, one provider, monitor fallback,
+corrupted file set aside, newer version untouched, AURORA_SIDE override)
+
+== Network failure (debug build, real adapters, only status and issue code read) ==
+HTTPS_PROXY=ALL_PROXY=http://127.0.0.1:9 (closed port: no request leaves the machine)
+  codex:      status=stale        issue=network                refreshing=false
+  claudeCode: status=unavailable  issue=credentialsUnavailable refreshing=false
+normal network
+  codex:      status=available    issue=null                   refreshing=false
+  claudeCode: status=unavailable  issue=credentialsUnavailable refreshing=false
+(The Claude Code CLI credential on this machine is empty; the Desktop app holds it.)
+
+== Release artifacts ==
+target/release/aurora-control.exe                 10,041,344 bytes  SHA-256 3D31D5065CE80ED810C93C1FCA85A4817B58296F935A4970655D9A939B578674
+bundle/nsis/Aurora Control_0.2.0_x64-setup.exe     2,384,904 bytes  SHA-256 EA277A2381D6DB6403008B817E706DBBE282438FFFF8318C66B9B6B3EB9C12DD
+
+== Silent install / uninstall ==
+install /S /D=%TEMP%\aurora-install-test: exit 0
+installed exe SHA-256 CEC8422B3DECC17B03A5F44A8EC897BA4CE4D2F84001D6D4975866D36175C4A6 (bundle-type patched)
+uninstall entry: Aurora Control 0.2.0; Start menu: Aurora Control.lnk
+installed binary (demo): rail window "Aurora Control" up; second launch exit 0
+uninstall /S: exit 0; exe, uninstall entry and shortcut removed; no Run value; no preferences folder
+
+== Audits ==
+npm audit: 0 vulnerabilities; npm audit --omit=dev: 0 vulnerabilities
+cargo audit: not installed on this machine

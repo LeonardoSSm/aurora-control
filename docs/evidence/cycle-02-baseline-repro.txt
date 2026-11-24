@@ -23,6 +23,6 @@ thread 'usage::scheduler::baseline_repro::i02_renewed_window_is_presented_as_fre
 assertion `left != right` failed: updatedAt Some("2026-11-23T18:00:00Z")
   left: Available { percent_used: 0 }
  right: Available { percent_used: 0 }
-thread 'usage::scheduler::baseline_repro::b02_rollout_resets_in_seconds_out_of_range_panics' (25204) panicked at C:\Users\deads\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\chrono-0.4.45\src\lib.rs:717:17:
-thread 'usage::scheduler::baseline_repro::b02_codex_reset_after_out_of_range_panics' (23700) panicked at C:\Users\deads\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\chrono-0.4.45\src\lib.rs:717:17:
+thread 'usage::scheduler::baseline_repro::b02_rollout_resets_in_seconds_out_of_range_panics' (25204) panicked at %USERPROFILE%\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\chrono-0.4.45\src\lib.rs:717:17:
+thread 'usage::scheduler::baseline_repro::b02_codex_reset_after_out_of_range_panics' (23700) panicked at %USERPROFILE%\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\chrono-0.4.45\src\lib.rs:717:17:
 test result: FAILED. 0 passed; 8 failed; 0 ignored; 0 measured; 47 filtered out; finished in 0.00s

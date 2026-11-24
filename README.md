@@ -36,6 +36,7 @@ A CI (`.github/workflows/ci.yml`) roda essas mesmas verificações em cada Pull 
 ```powershell
 pwsh -File scripts/validate-overlay.ps1 -Exe src-tauri/target/debug/aurora-control.exe -Side right
 pwsh -File scripts/validate-settings.ps1 -Exe src-tauri/target/debug/aurora-control.exe
+pwsh -File scripts/validate-settings-ui.ps1 -Exe src-tauri/target/debug/aurora-control.exe
 ```
 
 O executável fica em `src-tauri/target/release/aurora-control.exe` e o instalador NSIS em `src-tauri/target/release/bundle/nsis/`. O pacote de teste é gerado sem assinatura de código e instala para o usuário atual. Se necessário, o instalador obtém o WebView2 pelo bootstrapper da Microsoft.
