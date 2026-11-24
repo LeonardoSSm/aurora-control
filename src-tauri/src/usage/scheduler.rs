@@ -181,11 +181,12 @@ impl Tracker {
         self.manual_after = None;
     }
 
-    /// Applies what the local sign-in files say about the session.
-    fn observe(&mut self, session: Session) {
+    /// Applies what the local sign-in files say about the session. Returns
+    /// whether the state of a previous account was dropped.
+    fn observe(&mut self, session: Session) -> bool {
         let previous = std::mem::replace(&mut self.session, session);
-        match session {
-            Session::SignedOut => self.forget(),
+        let forget = match session {
+            Session::SignedOut => true,
             Session::Account { identity, .. } => {
                 let switched = previous.identity().is_some_and(|before| before != identity);
                 let foreign = self
@@ -193,14 +194,16 @@ impl Tracker {
                     .as_ref()
                     .and_then(|good| good.identity)
                     .is_some_and(|owner| owner != identity);
-                if switched || foreign || previous == Session::SignedOut {
-                    self.forget();
-                }
+                switched || foreign || previous == Session::SignedOut
             }
             // Proves nothing: keep the cache, but `usage` will not show
             // account data it cannot attribute.
-            Session::Unverified => {}
+            Session::Unverified => false,
+        };
+        if forget {
+            self.forget();
         }
+        forget
     }
 
     /// A session read from local files between attempts. A new account or a
@@ -223,7 +226,12 @@ impl Tracker {
             _ => false,
         };
         let signed_in = session.identity().is_some() && before.identity() != session.identity();
-        self.observe(session);
+        let fresh_account = self.observe(session) && session.identity().is_some();
+        if fresh_account {
+            // The schedule was set by the previous account (for example by
+            // its `Retry-After`): this account refreshes now.
+            self.next_due = now.instant;
+        }
         if renewed || signed_in {
             self.manual_after = None;
             let local = matches!(
@@ -245,7 +253,8 @@ impl Tracker {
 
     pub fn finish(&mut self, outcome: Outcome, now: Now) {
         self.in_flight = false;
-        self.observe(outcome.session);
+        // A switch seen here is followed by this outcome's own schedule.
+        let _ = self.observe(outcome.session);
         // Labels never carry over from an earlier attempt.
         self.account = outcome.account;
         self.plan = outcome.plan;
@@ -925,9 +934,31 @@ mod tests {
             at(0),
         );
         assert!(!tracker.should_fetch(at(30), true));
-        // Another account signs in: A's Retry-After does not apply to it.
+        assert!(!tracker.should_fetch(at(30), false));
+        // Another account signs in: A's Retry-After does not apply to it,
+        // neither to a click nor to the automatic refresh (PR #1 review).
         tracker.probe(account("B"), at(30));
         assert!(tracker.should_fetch(at(30), true));
+        assert!(
+            tracker.should_fetch(at(30), false),
+            "B's automatic refresh must not wait for A's deadline"
+        );
+        // The same after a logout and a sign-in to another account.
+        let mut tracker = tracker_with_a();
+        tracker.begin(at(0));
+        tracker.finish(
+            failed_as(
+                account("A"),
+                None,
+                FetchError::RateLimited {
+                    retry_after: Some(Duration::from_secs(3600)),
+                },
+            ),
+            at(0),
+        );
+        tracker.probe(Session::SignedOut, at(20));
+        tracker.probe(account("B"), at(30));
+        assert!(tracker.should_fetch(at(30), false));
         // A renewed credential of the same account keeps the server wait.
         let mut tracker = tracker_with_a();
         tracker.begin(at(0));
@@ -943,6 +974,7 @@ mod tests {
         );
         tracker.probe(Session::account(&["A"], "renewed"), at(30));
         assert!(!tracker.should_fetch(at(30), true));
+        assert!(!tracker.should_fetch(at(30), false));
     }
 
     // --- B02: checked time arithmetic ------------------------------------

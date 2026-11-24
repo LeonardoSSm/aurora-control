@@ -267,6 +267,14 @@ A falha da própria restauração não foi provocada no registro real, porque is
 - **M03 (conteúdo longo no resumo):** fora do escopo deste ciclo.
 - **`npm audit` e `cargo audit`:** ver a seção de build.
 
+### Segunda revisão do Codex (`efe6f5e`)
+
+Um achado P2: depois de um `Retry-After` longo da conta A e da troca para a conta B, a sondagem descartava a espera do servidor de A, mas o horário da próxima atualização automática (`next_due`) continuava o de A. O refresh automático de B ficava bloqueado até esse prazo, que pode chegar a 24 h. O teste de troca só verificava o clique. Reproduzido com o código de `efe6f5e`: `should_fetch(at(30), false)` era falso depois de `probe(account("B"))`.
+
+**Correção.** `observe` informa quando descarta o estado da conta anterior. A sondagem então antecipa `next_due` para agora quando a nova sessão é uma conta. A renovação da credencial da mesma conta mantém a espera do servidor.
+
+**Regressão.** `scheduler::b01_the_retry_state_of_one_account_does_not_bind_the_next` agora verifica o refresh automático e o manual, inclusive no caminho logout → outra conta, e confirma que a renovação da mesma conta continua bloqueada nos dois.
+
 ## Estado do PR #1
 
 - `main` continua em `07455f4`, sem merge.
