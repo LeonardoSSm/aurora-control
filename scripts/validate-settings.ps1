@@ -4,10 +4,11 @@
   and the single-instance guard, against a real build.
 
 .DESCRIPTION
-  Writes preference files in the format the app saves, starts the app in demo
-  mode and measures the rail through Win32. The preferences folder
-  (%APPDATA%\app.auroracontrol.desktop) is backed up first and restored at the
-  end. Run with PowerShell 7 (pwsh) in an interactive session.
+  Writes preference files in the format 0.2.0 saved (version 1), so every
+  start also exercises the migration to version 2, starts the app in demo
+  mode and measures the rail through Win32. The files live in a temporary
+  AURORA_CONFIG_DIR (debug builds only), never in the user's %APPDATA%. Run
+  with PowerShell 7 (pwsh) in an interactive session.
 #>
 param([Parameter(Mandatory)] [string] $Exe)
 
@@ -40,11 +41,14 @@ function Check([string] $name, [bool] $ok, [string] $detail = '') {
     Write-Output ("{0}  {1}  {2}" -f $(if ($ok) { 'PASS' } else { 'FAIL' }), $name, $detail)
 }
 
-$dir = Join-Path $env:APPDATA 'app.auroracontrol.desktop'
+# Debug builds keep preferences in AURORA_CONFIG_DIR: the user's real
+# %APPDATA% folder is never read or written by this script.
+$dir = Join-Path ([IO.Path]::GetTempPath()) ('aurora-config-' + [guid]::NewGuid())
+$env:AURORA_CONFIG_DIR = $dir
 $file = Join-Path $dir 'preferences.json'
-$backup = Join-Path ([IO.Path]::GetTempPath()) ('aurora-prefs-backup-' + [guid]::NewGuid())
-$existed = Test-Path $dir
-if ($existed) { Copy-Item $dir $backup -Recurse }
+$backup = $null
+$existed = $false
+
 $profile = Join-Path ([IO.Path]::GetTempPath()) ('aurora-settings-' + [guid]::NewGuid())
 $env:WEBVIEW2_USER_DATA_FOLDER = Join-Path $profile 'webview'
 $env:AURORA_DEMO = '73,25'
