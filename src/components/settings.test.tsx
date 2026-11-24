@@ -27,13 +27,13 @@ const now = new Date("2026-11-23T18:00:00Z");
 const choice = (enabled: boolean) => ({ enabled, metric: null, alerts: true });
 
 const preferences: Preferences = {
-  version: 2,
+  version: 3,
   side: "right",
   monitor: { id: "m-00000000000000aa", name: "Dell U2720Q" },
   providers: {
     codex: choice(true),
     claudeCode: choice(true),
-    gemini: choice(false),
+    antigravity: choice(false),
     grok: choice(false),
   },
   launchAtStartup: false,
@@ -55,6 +55,7 @@ function providerView(id: ProviderView["id"]): ProviderView {
     name: entry.name,
     vendor: entry.vendor,
     integration: entry.integration,
+    origin: null,
     capabilities: [...entry.capabilities],
     reconnect: entry.reconnect,
     status: "unavailable",
@@ -103,7 +104,7 @@ const view: SettingsView = {
   providers: [
     providerView("codex"),
     claude,
-    providerView("gemini"),
+    providerView("antigravity"),
     providerView("grok"),
   ],
   thresholds: [70, 85, 95, 100],
@@ -201,7 +202,7 @@ describe("settings · monitors", () => {
       providers: {
         codex: choice(true),
         claudeCode: choice(true),
-        gemini: choice(true),
+        antigravity: choice(true),
         grok: choice(true),
       },
     };
@@ -225,10 +226,12 @@ describe("settings · providers", () => {
     for (const entry of catalog) {
       expect(markup).toContain(`aria-label="Mostrar ${entry.name}"`);
     }
-    expect(markup).toMatch(/aria-checked="false" aria-label="Mostrar Gemini"/);
+    expect(markup).toMatch(
+      /aria-checked="false" aria-label="Mostrar Antigravity"/,
+    );
     expect(markup).toMatch(/aria-checked="false" aria-label="Mostrar Grok"/);
     // Honest integration levels.
-    expect(markup).toContain("sem fonte de cotas autorizada");
+    expect(markup).toContain("Cotas reais pelo CLI oficial");
     expect(markup).toContain("desativada até a verificação dos termos");
   });
 
@@ -255,20 +258,51 @@ describe("settings · providers", () => {
   });
 
   it("explains a blocked quota source without asking for credentials", () => {
-    const gemini: ProviderView = {
-      ...providerView("gemini"),
-      issue: { code: "sourceBlocked", reason: "providerTerms" },
-      account: "u•••@gmail.com",
+    const grok: ProviderView = {
+      ...providerView("grok"),
+      issue: { code: "sourceBlocked", reason: "termsUnverified" },
+      account: "u•••@example.com",
       checkedAt: "2026-11-23T17:59:00Z",
     };
     const markup = render({
-      preferences: updateProvider(preferences, "gemini", { enabled: true }),
-      providers: [providerView("codex"), claude, gemini, providerView("grok")],
+      preferences: updateProvider(preferences, "grok", { enabled: true }),
+      providers: [
+        providerView("codex"),
+        claude,
+        providerView("antigravity"),
+        grok,
+      ],
     });
     expect(markup).toContain("Sessão detectada");
-    expect(markup).toContain("termos do Gemini CLI");
+    expect(markup).toContain("termos de uso da xAI");
     // Never a credential value or a prompt for one.
     expect(markup).not.toMatch(/ya29.|Bearer|refresh_token|senha|cookie/i);
+  });
+
+  it("names the source of the data", () => {
+    const antigravity: ProviderView = {
+      ...providerView("antigravity"),
+      status: "available",
+      origin: "cli",
+      updatedAt: "2026-11-23T17:59:00Z",
+      checkedAt: "2026-11-23T17:59:00Z",
+      metrics: [
+        { id: "agy-gemini-5h", label: "Gemini · 5 h", durationMinutes: 300 },
+      ],
+    };
+    const markup = render({
+      preferences: updateProvider(preferences, "antigravity", {
+        enabled: true,
+      }),
+      providers: [
+        providerView("codex"),
+        claude,
+        antigravity,
+        providerView("grok"),
+      ],
+    });
+    expect(markup).toContain("Fonte: CLI oficial, comando somente leitura");
+    expect(markup).toContain("Gemini · 5 h");
   });
 });
 
@@ -298,7 +332,7 @@ describe("settings · metric selection", () => {
       providers: [
         providerView("codex"),
         { ...claude, metricMissing: true },
-        providerView("gemini"),
+        providerView("antigravity"),
         providerView("grok"),
       ],
     });
