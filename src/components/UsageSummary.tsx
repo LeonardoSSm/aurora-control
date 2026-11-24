@@ -94,11 +94,19 @@ export function UsageSummary({
             {reading.text}
           </strong>
           <span className="primary-label">
-            {usage.window?.label ??
-              (hasReading ? "Consumo" : "Consumo indisponível")}
+            {usage.metricMissing
+              ? "Métrica escolhida indisponível"
+              : (usage.window?.label ??
+                (hasReading ? "Consumo" : "Consumo indisponível"))}
           </span>
         </div>
         <Bar percent={reading.percent} tone={reading.tone} />
+        {usage.metricMissing && (
+          <p className="primary-reset">
+            A última leitura não trouxe a métrica escolhida. Volte à seleção
+            automática nas configurações para ver a cota mais consumida.
+          </p>
+        )}
         {usage.window && (
           <p className="primary-reset">
             {usage.window.renewed

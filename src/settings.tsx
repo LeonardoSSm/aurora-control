@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Settings } from "./components/Settings";
+import type { TestState } from "./components/Settings";
 import {
-  getClaudeDiagnostics,
+  getDiagnostics,
   getSettings,
+  sendTestNotification,
   setPreferences,
 } from "./desktop/settings";
 import type {
@@ -11,6 +13,7 @@ import type {
   Preferences,
   SettingsView,
 } from "./desktop/settings";
+import type { Provider } from "./usage/model";
 import "./styles.css";
 
 function message(error: unknown) {
@@ -19,25 +22,34 @@ function message(error: unknown) {
 
 function App() {
   const [view, setView] = useState<SettingsView | null>(null);
-  const [diagnostics, setDiagnostics] = useState<Diagnostics | null>(null);
+  const [diagnostics, setDiagnostics] = useState<
+    Partial<Record<Provider, Diagnostics | null>>
+  >({});
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [test, setTest] = useState<TestState>("idle");
+  const [now, setNow] = useState(() => new Date());
 
-  const recheck = useCallback(() => {
-    void getClaudeDiagnostics().then(setDiagnostics, console.error);
+  const diagnose = useCallback((provider: Provider) => {
+    void getDiagnostics(provider).then(
+      (result) =>
+        setDiagnostics((current) => ({ ...current, [provider]: result })),
+      console.error,
+    );
   }, []);
 
   useEffect(() => {
     void getSettings().then(setView, (failure: unknown) =>
       setError(message(failure)),
     );
-    recheck();
-    // Monitors may be attached or removed while the window is open.
+    // Monitors, connection states and readings change while the window is
+    // open: the view is refreshed from the backend (no provider is queried).
     const timer = setInterval(() => {
+      setNow(new Date());
       void getSettings().then(setView, console.error);
     }, 5_000);
     return () => clearInterval(timer);
-  }, [recheck]);
+  }, []);
 
   const save = (preferences: Preferences) => {
     setSaving(true);
@@ -46,8 +58,8 @@ function App() {
       .then(
         (next) => {
           setView(next);
-          // Showing or hiding Claude Code changes what may be diagnosed.
-          recheck();
+          // Enabling or disabling a provider changes what may be diagnosed.
+          setDiagnostics({});
         },
         (failure: unknown) => {
           setError(message(failure));
@@ -57,6 +69,17 @@ function App() {
         },
       )
       .finally(() => setSaving(false));
+  };
+
+  const testNotification = () => {
+    setTest("sending");
+    void sendTestNotification().then(
+      () => setTest("sent"),
+      (failure: unknown) => {
+        console.error(failure);
+        setTest("failed");
+      },
+    );
   };
 
   if (!view) {
@@ -72,9 +95,11 @@ function App() {
       diagnostics={diagnostics}
       saving={saving}
       error={error}
-      now={new Date()}
+      now={now}
+      test={test}
       onSave={save}
-      onRecheck={recheck}
+      onDiagnose={diagnose}
+      onTestNotification={testNotification}
     />
   );
 }

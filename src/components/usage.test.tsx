@@ -49,6 +49,8 @@ const sample: Usage = {
   checkedAt: "2026-11-23T17:58:00Z",
   issue: null,
   refreshing: false,
+  selectedMetric: null,
+  metricMissing: false,
 };
 
 type RailProps = Parameters<typeof Rail>[0];

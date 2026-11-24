@@ -21,6 +21,21 @@ interface UsageRingProps {
   onRefresh: (provider: Provider) => void;
 }
 
+/**
+ * Whether the collapsed indicator carries a flag: `issue` when the provider
+ * needs the user's attention (sign-in, errors, a chosen metric that is gone),
+ * `blocked` when the quota source is unavailable by design.
+ */
+export function attention(
+  usage: Usage | undefined,
+): "issue" | "blocked" | null {
+  if (!usage || usage.source === "demo") return null;
+  if (usage.issue?.code === "sourceBlocked") return "blocked";
+  if (usage.metricMissing) return "issue";
+  if (usage.issue && usage.status !== "available") return "issue";
+  return null;
+}
+
 export function UsageRing({
   provider,
   usage,
@@ -45,12 +60,15 @@ export function UsageRing({
   const expandedSize = wide ? 11.5 : 12.5;
   const tag = shortDuration(usage?.window?.durationMinutes);
   const enter = () => onPointer(provider);
+  const flag = attention(usage);
+  const gradient = `ring-accent-${provider}`;
 
   return (
     <div
       className="indicator"
       data-provider={provider}
       data-tone={reading.tone}
+      data-flag={flag ?? undefined}
       data-active={active || undefined}
       role="img"
       aria-label={`${providerNames[provider]}, ${reading.label}`}
@@ -66,9 +84,30 @@ export function UsageRing({
         height={indicatorDiameter}
         aria-hidden="true"
       >
+        <defs>
+          {/* Bottom to top, like the gauge: the provider's two accents. */}
+          <linearGradient id={gradient} x1="0" y1="1" x2="0" y2="0">
+            <stop className="ring-stop-start" offset="0" />
+            <stop className="ring-stop-end" offset="1" />
+          </linearGradient>
+        </defs>
         <circle className="ring-disc" cx={cx} cy={cy} r={discRadius} />
         {track && <path className="ring-track" d={track} />}
-        {fill && <path className="ring-progress" d={fill} />}
+        {fill && (
+          <path
+            className="ring-progress"
+            d={fill}
+            stroke={`url(#${gradient})`}
+          />
+        )}
+        {flag && (
+          <circle
+            className="ring-flag"
+            cx={textX}
+            cy={cy - 15 + 3 * progress}
+            r={2.6}
+          />
+        )}
         <text
           className="ring-value"
           x={textX}

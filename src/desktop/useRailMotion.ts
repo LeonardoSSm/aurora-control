@@ -15,8 +15,28 @@ import type { RailShifts } from "./railGeometry";
 const openMs = 230;
 const closeMs = 190;
 
-function same(first: RailShifts, second: RailShifts) {
-  return first[0] === second[0] && first[1] === second[1];
+export function same(first: RailShifts, second: RailShifts) {
+  return (
+    first.length === second.length &&
+    first.every((value, index) => value === second[index])
+  );
+}
+
+/** Offsets that expand `slot` (or nothing, for -1) and collapse the rest. */
+export function targetShifts(slot: number): RailShifts {
+  return collapsedShifts.map((_, index) => (index === slot ? slide : 0));
+}
+
+/** One animation step of every slot from `from` toward `target`. */
+export function stepShifts(
+  from: RailShifts,
+  target: RailShifts,
+  eased: number,
+): RailShifts {
+  return target.map((goal, index) => {
+    const start = from[index] ?? 0;
+    return Math.round(start + (goal - start) * eased);
+  });
 }
 
 const easeOut = (t: number) => 1 - (1 - t) ** 3;
@@ -68,10 +88,7 @@ export function useRailMotion() {
         ? 1
         : (opening ? easeOut : easeInOut)(elapsed);
       const from = transition.from;
-      const next: RailShifts = [
-        Math.round(from[0] + (target[0] - from[0]) * eased),
-        Math.round(from[1] + (target[1] - from[1]) * eased),
-      ];
+      const next = stepShifts(from, target, eased);
       if (same(shifts, next)) {
         schedule();
         return;
@@ -120,7 +137,7 @@ export function useRailMotion() {
       if (!active) reported = null;
       // Shifts are per visible slot, in the order Rust placed them.
       const slot = active ? placement.providers.indexOf(active) : -1;
-      target = [slot === 0 ? slide : 0, slot === 1 ? slide : 0];
+      target = targetShifts(slot);
       transition = undefined;
       setFrame({ placement, shifts, active });
       schedule();
