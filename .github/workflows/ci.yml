@@ -69,3 +69,6 @@ jobs:
 
       - name: Desktop build (no installer)
         run: npm run desktop:debug
+
+      - name: Production build with NSIS installer
+        run: npm run desktop:build

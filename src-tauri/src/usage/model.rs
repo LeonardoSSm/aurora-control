@@ -8,6 +8,30 @@ use serde::{Deserialize, Serialize};
 pub enum Provider {
     Codex,
     ClaudeCode,
+    Gemini,
+    Grok,
+}
+
+impl Provider {
+    /// Every provider, in display order (see `catalog.rs`).
+    pub const ALL: [Provider; 4] = [
+        Provider::Codex,
+        Provider::ClaudeCode,
+        Provider::Gemini,
+        Provider::Grok,
+    ];
+}
+
+/// Why a provider has no quota source this app may use.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BlockReason {
+    /// The provider's terms forbid third-party software from using the
+    /// client's sign-in to reach the service (Gemini CLI).
+    ProviderTerms,
+    /// A source exists, but its terms of use could not be verified: the query
+    /// stays off until they are (Grok).
+    TermsUnverified,
 }
 
 /// Primary metric. `stale` keeps the last valid percentage.
@@ -152,6 +176,11 @@ pub enum Issue {
         status: u16,
         retry_at: Option<String>,
     },
+    /// The sign-in was read locally, but no authorized quota source exists.
+    /// Nothing is sent to the provider.
+    SourceBlocked {
+        reason: BlockReason,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -176,6 +205,12 @@ pub struct Usage {
     pub checked_at: Option<String>,
     pub issue: Option<Issue>,
     pub refreshing: bool,
+    /// The metric the user chose for the ring, or `None` for the automatic
+    /// choice (the most consumed window).
+    pub selected_metric: Option<String>,
+    /// The chosen metric is absent from the latest reading: the ring shows no
+    /// value instead of silently switching to another metric.
+    pub metric_missing: bool,
 }
 
 pub type Snapshot = Vec<Usage>;

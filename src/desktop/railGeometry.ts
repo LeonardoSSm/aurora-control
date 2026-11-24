@@ -7,7 +7,12 @@ export const slide = indicatorRadius + expandedInset;
 export const indicatorGap = 14;
 export const indicatorStep = indicatorDiameter + indicatorGap;
 export const railWidth = slide + indicatorRadius + 2;
-export const railHeight = indicatorStep + indicatorDiameter;
+/** One slot per catalog provider (src-tauri/src/windows/position.rs). */
+export const maxIndicators = 4;
+/** Height of the rail with `slots` indicators. */
+export const railHeightFor = (slots: number) =>
+  Math.min(Math.max(slots, 1), maxIndicators) * indicatorStep - indicatorGap;
+export const railHeight = railHeightFor(2);
 
 /** Radius of the disc. Half a pixel inside the region, for an anti-aliased edge. */
 export const discRadius = indicatorRadius - 0.5;
@@ -16,9 +21,13 @@ export const arcWidth = 5.5;
 export const arcRadius = discRadius - 1 - arcWidth / 2 - 1;
 
 export type Side = "left" | "right";
-export type RailShifts = readonly [number, number];
+/** Slide offset of each indicator slot, from the top. */
+export type RailShifts = readonly number[];
 
-export const collapsedShifts: RailShifts = [0, 0];
+export const collapsedShifts: RailShifts = Array.from(
+  { length: maxIndicators },
+  () => 0,
+);
 
 /**
  * The gauge is the semicircle that faces the inside of the screen: the half

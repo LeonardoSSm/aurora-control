@@ -1,6 +1,9 @@
 // Mirrors src-tauri/src/usage/model.rs. Never carries credentials.
 
-export type Provider = "codex" | "claudeCode";
+import type { Provider } from "./catalog";
+
+export type { Provider } from "./catalog";
+export { providerNames, providers } from "./catalog";
 export type Origin = "api" | "sessionLog" | "fixture";
 export type QuotaKind = "window" | "credits";
 
@@ -50,7 +53,11 @@ export type Issue =
         | "malformed";
     }
   | { code: "rateLimited"; retryAt: string | null }
-  | { code: "http"; status: number; retryAt: string | null };
+  | { code: "http"; status: number; retryAt: string | null }
+  | { code: "sourceBlocked"; reason: BlockReason };
+
+/** Why a provider has no quota source this app may use. */
+export type BlockReason = "providerTerms" | "termsUnverified";
 
 type Reading =
   | { status: "available" | "stale"; percentUsed: number }
@@ -72,6 +79,10 @@ export type Usage = Reading & {
   checkedAt: string | null;
   issue: Issue | null;
   refreshing: boolean;
+  /** The metric chosen for the ring, or null for the automatic choice. */
+  selectedMetric: string | null;
+  /** The chosen metric is absent from the latest reading. */
+  metricMissing: boolean;
 };
 
 export type Snapshot = readonly Usage[];
@@ -81,10 +92,3 @@ export interface UsageUpdate {
   sequence: number;
   snapshot: Snapshot;
 }
-
-export const providers = ["codex", "claudeCode"] as const;
-
-export const providerNames: Record<Provider, string> = {
-  codex: "Codex",
-  claudeCode: "Claude Code",
-};

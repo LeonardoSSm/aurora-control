@@ -1,9 +1,15 @@
 //! User preferences: local, versioned, validated, written atomically.
 //!
-//! Only stable product choices are stored: the rail side, the selected
-//! monitor (a stable digest plus a display name), the visible providers and
-//! the start-up choice. Usage data, retry deadlines and account identities are
-//! never written here (audit I07, M04).
+//! Only stable product choices are stored: the rail side and visibility, the
+//! selected monitor (a stable digest plus a display name), each provider's
+//! activation, ring metric and alerts, the notification choices and the
+//! start-up choice. Usage data, retry deadlines, alert history and account
+//! identities are never written here (audit I07, M04).
+//!
+//! Versions: 1 (0.2.0) had two provider switches; 2 (0.3.0) has one entry
+//! per catalog provider and the notification settings. [`migrate`] upgrades
+//! version 1 documents, keeping every choice; providers added in 0.3.0 start
+//! disabled.
 //!
 //! Precedence: environment (`AURORA_SIDE`) > preferences > defaults. An
 //! environment override is applied for the session and never persisted.
@@ -19,16 +25,20 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::sync::lock;
-use crate::usage::Provider;
+use crate::usage::{Provider, catalog};
 use crate::windows::Side;
 
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 const FILE: &str = "preferences.json";
 const MAX_FILE: u64 = 64 * 1024;
 const MAX_NAME: usize = 96;
+const MAX_METRIC: usize = 64;
+/// Consumption levels a user may be alerted at, in percent.
+pub const THRESHOLDS: [u8; 4] = [70, 85, 95, 100];
+const MINUTES_PER_DAY: u16 = 24 * 60;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,23 +49,125 @@ pub struct MonitorChoice {
     pub name: String,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+/// The choices for one provider.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderChoice {
+    /// Shown on the rail. A disabled provider reads no file, sends no
+    /// request and raises no alert.
+    pub enabled: bool,
+    /// The quota drawn by the ring; `None` picks the most consumed window.
+    #[serde(default)]
+    pub metric: Option<String>,
+    /// Alerts for this provider (when notifications are on).
+    #[serde(default = "enabled")]
+    pub alerts: bool,
+}
+
+fn enabled() -> bool {
+    true
+}
+
+impl ProviderChoice {
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            metric: None,
+            alerts: true,
+        }
+    }
+}
+
+/// One entry per catalog provider. A struct, not a map, so both languages
+/// keep a typed contract.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Providers {
-    pub codex: bool,
-    pub claude_code: bool,
+    pub codex: ProviderChoice,
+    pub claude_code: ProviderChoice,
+    pub gemini: ProviderChoice,
+    pub grok: ProviderChoice,
+}
+
+impl Default for Providers {
+    fn default() -> Self {
+        let choice = |provider| ProviderChoice::new(catalog::entry(provider).default_enabled);
+        Self {
+            codex: choice(Provider::Codex),
+            claude_code: choice(Provider::ClaudeCode),
+            gemini: choice(Provider::Gemini),
+            grok: choice(Provider::Grok),
+        }
+    }
 }
 
 impl Providers {
+    pub fn get(&self, provider: Provider) -> &ProviderChoice {
+        match provider {
+            Provider::Codex => &self.codex,
+            Provider::ClaudeCode => &self.claude_code,
+            Provider::Gemini => &self.gemini,
+            Provider::Grok => &self.grok,
+        }
+    }
+
+    /// Enabled providers, in catalog order: the rail's indicators.
     pub fn visible(&self) -> Vec<Provider> {
-        let mut visible = Vec::new();
-        if self.codex {
-            visible.push(Provider::Codex);
+        Provider::ALL
+            .into_iter()
+            .filter(|provider| self.get(*provider).enabled)
+            .collect()
+    }
+
+    /// The ring metric of every provider.
+    pub fn metrics(&self) -> Vec<(Provider, Option<String>)> {
+        Provider::ALL
+            .into_iter()
+            .map(|provider| (provider, self.get(provider).metric.clone()))
+            .collect()
+    }
+}
+
+/// A daily period without notifications, in local minutes since midnight.
+/// `start > end` crosses midnight (for example 22:00 to 07:00).
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QuietHours {
+    pub enabled: bool,
+    pub start: u16,
+    pub end: u16,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Notifications {
+    /// Master switch.
+    pub enabled: bool,
+    /// Consumption levels to alert at, a sorted subset of [`THRESHOLDS`].
+    pub thresholds: Vec<u8>,
+    /// A renewal confirmed by a new reading.
+    pub renewal: bool,
+    /// Expired, missing or rejected sign-ins.
+    pub auth: bool,
+    /// A provider readable again after a sign-in problem.
+    pub reconnect: bool,
+    pub quiet: QuietHours,
+}
+
+impl Default for Notifications {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            thresholds: vec![85, 95, 100],
+            renewal: true,
+            auth: true,
+            reconnect: false,
+            quiet: QuietHours {
+                enabled: false,
+                start: 22 * 60,
+                end: 7 * 60,
+            },
         }
-        if self.claude_code {
-            visible.push(Provider::ClaudeCode);
-        }
-        visible
     }
 }
 
@@ -68,6 +180,9 @@ pub struct Preferences {
     pub monitor: Option<MonitorChoice>,
     pub providers: Providers,
     pub launch_at_startup: bool,
+    /// The rail is shown. The tray can still hide or show it.
+    pub rail_visible: bool,
+    pub notifications: Notifications,
 }
 
 impl Default for Preferences {
@@ -76,11 +191,10 @@ impl Default for Preferences {
             version: VERSION,
             side: Side::Right,
             monitor: None,
-            providers: Providers {
-                codex: true,
-                claude_code: true,
-            },
+            providers: Providers::default(),
             launch_at_startup: false,
+            rail_visible: true,
+            notifications: Notifications::default(),
         }
     }
 }
@@ -93,14 +207,50 @@ fn valid_monitor_id(id: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+/// Quota ids are short identifiers built by the adapters (`fiveHour`,
+/// `codex-primary`, `grok-credits`).
+fn valid_metric(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_METRIC
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+}
+
 impl Preferences {
-    /// Checks every field. Names are cleaned rather than rejected.
+    /// Checks every field. Names are cleaned rather than rejected. Zero
+    /// visible providers is valid: the rail hides, and the tray and the
+    /// settings stay available.
     pub fn validate(mut self) -> Result<Self, String> {
         if self.version != VERSION {
             return Err(format!("unsupported version {}", self.version));
         }
-        if !self.providers.codex && !self.providers.claude_code {
-            return Err("at least one provider must stay visible".into());
+        let invalid_metric = Provider::ALL.into_iter().any(|provider| {
+            self.providers
+                .get(provider)
+                .metric
+                .as_deref()
+                .is_some_and(|metric| !valid_metric(metric))
+        });
+        if invalid_metric {
+            return Err("invalid metric identifier".into());
+        }
+        let notifications = &mut self.notifications;
+        if notifications
+            .thresholds
+            .iter()
+            .any(|threshold| !THRESHOLDS.contains(threshold))
+        {
+            return Err("invalid alert threshold".into());
+        }
+        notifications.thresholds.sort_unstable();
+        notifications.thresholds.dedup();
+        let quiet = notifications.quiet;
+        if quiet.start >= MINUTES_PER_DAY || quiet.end >= MINUTES_PER_DAY {
+            return Err("invalid quiet hours".into());
+        }
+        if quiet.enabled && quiet.start == quiet.end {
+            return Err("quiet hours must not be empty".into());
         }
         if let Some(monitor) = &mut self.monitor {
             if !valid_monitor_id(&monitor.id) {
@@ -125,6 +275,9 @@ pub enum LoadStatus {
     /// No file yet: defaults.
     Default,
     Loaded,
+    /// A file of an older version was read and upgraded in memory. The file
+    /// itself is rewritten in the current format at the next change.
+    Migrated,
     /// The file was invalid; it was kept aside and defaults are used.
     Recovered,
     /// Written by a newer version: left untouched until a change is saved.
@@ -134,7 +287,8 @@ pub enum LoadStatus {
 }
 
 /// Reads and validates a preferences document. Pure: no file access.
-pub fn parse(text: &str) -> Result<Preferences, LoadStatus> {
+/// Also returns whether the document was upgraded from an older version.
+pub fn parse(text: &str) -> Result<(Preferences, bool), LoadStatus> {
     let value: Value = serde_json::from_str(text).map_err(|_| LoadStatus::Recovered)?;
     let version = value
         .get("version")
@@ -144,18 +298,44 @@ pub fn parse(text: &str) -> Result<Preferences, LoadStatus> {
         return Err(LoadStatus::NewerVersion);
     }
     let value = migrate(value, version).ok_or(LoadStatus::Recovered)?;
-    serde_json::from_value::<Preferences>(value)
+    let preferences = serde_json::from_value::<Preferences>(value)
         .map_err(|_| LoadStatus::Recovered)?
         .validate()
-        .map_err(|_| LoadStatus::Recovered)
+        .map_err(|_| LoadStatus::Recovered)?;
+    Ok((preferences, version < u64::from(VERSION)))
 }
 
-/// Upgrades an older document to the current version. Version 1 is the first
-/// persisted format, so there is nothing older to convert yet; the hook keeps
-/// the upgrade path explicit for the next format change.
-fn migrate(value: Value, version: u64) -> Option<Value> {
+/// Upgrades an older document, one version at a time, to the current one.
+fn migrate(mut value: Value, version: u64) -> Option<Value> {
     match version {
-        1 => Some(value),
+        1 => {
+            // 0.2.0: `providers: { codex: bool, claudeCode: bool }`. Each
+            // provider keeps its state; everything else is kept as written.
+            let object = value.as_object_mut()?;
+            let old = object.get("providers")?;
+            let codex = old.get("codex")?.as_bool()?;
+            let claude = old.get("claudeCode")?.as_bool()?;
+            let choice =
+                |enabled: bool| json!({ "enabled": enabled, "metric": null, "alerts": true });
+            object.insert(
+                "providers".into(),
+                json!({
+                    "codex": choice(codex),
+                    "claudeCode": choice(claude),
+                    // New in 0.3.0: off until the user turns them on.
+                    "gemini": choice(false),
+                    "grok": choice(false),
+                }),
+            );
+            object.insert("railVisible".into(), json!(true));
+            object.insert(
+                "notifications".into(),
+                serde_json::to_value(Notifications::default()).ok()?,
+            );
+            object.insert("version".into(), json!(2));
+            migrate(value, 2)
+        }
+        2 => Some(value),
         _ => None,
     }
 }
@@ -177,7 +357,10 @@ impl Store {
             Err(crate::usage::ReadError::Missing) => (Preferences::default(), LoadStatus::Default),
             Err(_) => (Preferences::default(), set_aside(&path)),
             Ok(text) => match parse(&text) {
-                Ok(preferences) => (preferences, LoadStatus::Loaded),
+                Ok((preferences, false)) => (preferences, LoadStatus::Loaded),
+                // The older file stays as it is until the user saves a
+                // change; a downgrade to 0.2.0 can still read it meanwhile.
+                Ok((preferences, true)) => (preferences, LoadStatus::Migrated),
                 Err(LoadStatus::NewerVersion) => (Preferences::default(), LoadStatus::NewerVersion),
                 Err(_) => (Preferences::default(), set_aside(&path)),
             },
@@ -252,6 +435,19 @@ fn write_atomic(path: &Path, preferences: &Preferences) -> std::io::Result<()> {
     result
 }
 
+/// Debug builds only: `AURORA_CONFIG_DIR` replaces the preferences folder, so
+/// validation scripts never read or write the user's real preferences. Tauri
+/// resolves the folder through the Windows known-folder API, which ignores
+/// the `APPDATA` variable. Release builds ignore this variable.
+pub fn debug_config_dir() -> Option<PathBuf> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    std::env::var_os("AURORA_CONFIG_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
 /// The side to use for this session.
 pub fn effective_side(preferences: &Preferences) -> (Side, bool) {
     side_override(std::env::var("AURORA_SIDE").ok().as_deref())
@@ -272,20 +468,30 @@ mod tests {
     use crate::usage::testing::TempDir;
 
     fn valid() -> Preferences {
-        Preferences {
+        let mut preferences = Preferences {
             side: Side::Left,
             monitor: Some(MonitorChoice {
                 id: "m-0123456789abcdef".into(),
                 name: "Dell U2720Q".into(),
             }),
-            providers: Providers {
-                codex: false,
-                claude_code: true,
-            },
             launch_at_startup: true,
             ..Preferences::default()
-        }
+        };
+        preferences.providers.codex.enabled = false;
+        preferences.providers.grok.enabled = true;
+        preferences.providers.claude_code.metric = Some("fiveHour".into());
+        preferences.notifications.thresholds = vec![70, 100];
+        preferences
     }
+
+    /// A document exactly as 0.2.0 wrote it.
+    const V1: &str = r#"{
+  "version": 1,
+  "side": "left",
+  "monitor": { "id": "m-0123456789abcdef", "name": "Dell U2720Q" },
+  "providers": { "codex": false, "claudeCode": true },
+  "launchAtStartup": true
+}"#;
 
     #[test]
     fn saved_preferences_survive_a_restart() {
@@ -306,17 +512,96 @@ mod tests {
     }
 
     #[test]
+    fn defaults_keep_the_new_providers_off_and_alerts_on() {
+        let defaults = Preferences::default();
+        assert_eq!(
+            defaults.providers.visible(),
+            [Provider::Codex, Provider::ClaudeCode]
+        );
+        assert!(defaults.notifications.enabled && defaults.rail_visible);
+        assert_eq!(defaults.notifications.thresholds, [85, 95, 100]);
+        assert!(!defaults.notifications.quiet.enabled);
+    }
+
+    #[test]
+    fn a_version_1_file_is_migrated_keeping_every_choice() {
+        let (preferences, migrated) = parse(V1).unwrap();
+        assert!(migrated);
+        assert_eq!(preferences.version, VERSION);
+        assert_eq!(preferences.side, Side::Left);
+        assert_eq!(
+            preferences.monitor,
+            Some(MonitorChoice {
+                id: "m-0123456789abcdef".into(),
+                name: "Dell U2720Q".into(),
+            })
+        );
+        assert!(preferences.launch_at_startup);
+        assert!(!preferences.providers.codex.enabled);
+        assert!(preferences.providers.claude_code.enabled);
+        // New providers stay off; nothing is read from them.
+        assert!(!preferences.providers.gemini.enabled);
+        assert!(!preferences.providers.grok.enabled);
+        assert_eq!(preferences.providers.visible(), [Provider::ClaudeCode]);
+        assert!(
+            Provider::ALL.into_iter().all(|provider| preferences
+                .providers
+                .get(provider)
+                .metric
+                .is_none())
+        );
+        assert!(preferences.rail_visible);
+        assert_eq!(preferences.notifications, Notifications::default());
+
+        // The other v1 combination.
+        let both = V1.replace("\"codex\": false", "\"codex\": true");
+        assert_eq!(
+            parse(&both).unwrap().0.providers.visible(),
+            [Provider::Codex, Provider::ClaudeCode]
+        );
+    }
+
+    #[test]
+    fn a_migrated_file_is_rewritten_only_when_the_user_saves() {
+        let dir = TempDir::new("prefs-migrate");
+        dir.write(FILE, V1);
+        let store = Store::load(Some(dir.path().into()));
+        assert_eq!(store.status(), LoadStatus::Migrated);
+        assert_eq!(store.get().side, Side::Left);
+        // Still the 0.2.0 file on disk: a downgrade keeps working.
+        assert_eq!(fs::read_to_string(dir.path().join(FILE)).unwrap(), V1);
+
+        let mut changed = store.get();
+        changed.providers.gemini.enabled = true;
+        store.set(changed.clone()).unwrap();
+        let restarted = Store::load(Some(dir.path().into()));
+        assert_eq!(restarted.status(), LoadStatus::Loaded);
+        assert_eq!(restarted.get(), changed);
+        let written: Value =
+            serde_json::from_str(&fs::read_to_string(dir.path().join(FILE)).unwrap()).unwrap();
+        assert_eq!(written["version"], 2);
+        assert_eq!(written["providers"]["gemini"]["enabled"], true);
+        assert_eq!(written["monitor"]["id"], "m-0123456789abcdef");
+    }
+
+    #[test]
     fn corrupted_files_are_set_aside_and_defaults_used() {
+        let v2 = serde_json::to_string(&valid()).unwrap();
         for corrupted in [
-            "{\"version\": 1, \"side\": \"lef",
-            "[]",
-            "{\"side\": \"left\"}",
-            "{\"version\": 1, \"side\": \"up\", \"monitor\": null, \"providers\": {\"codex\": true, \"claudeCode\": true}, \"launchAtStartup\": false}",
-            "{\"version\": 1, \"side\": \"left\", \"monitor\": null, \"providers\": {\"codex\": false, \"claudeCode\": false}, \"launchAtStartup\": false}",
-            "{\"version\": 1, \"side\": \"left\", \"monitor\": {\"id\": \"..\\\\x\", \"name\": \"x\"}, \"providers\": {\"codex\": true, \"claudeCode\": true}, \"launchAtStartup\": false}",
+            "{\"version\": 1, \"side\": \"lef".to_string(),
+            "[]".into(),
+            "{\"side\": \"left\"}".into(),
+            V1.replace("\"left\"", "\"up\""),
+            V1.replace("m-0123456789abcdef", "..\\\\x"),
+            V1.replace("\"codex\": false, ", ""),
+            v2.replace("\"fiveHour\"", "\"five hour!\""),
+            v2.replace("[70,100]", "[50]"),
+            v2.replace("\"start\":1320", "\"start\":1440"),
+            v2.replace("\"grok\":", "\"copilot\":"),
+            r#"{"version": 0}"#.into(),
         ] {
             let dir = TempDir::new("prefs-corrupt");
-            dir.write(FILE, corrupted);
+            dir.write(FILE, &corrupted);
             let store = Store::load(Some(dir.path().into()));
             assert_eq!(store.status(), LoadStatus::Recovered, "{corrupted}");
             assert_eq!(store.get(), Preferences::default());
@@ -344,7 +629,7 @@ mod tests {
     #[test]
     fn a_newer_version_is_left_untouched_until_the_user_saves() {
         let dir = TempDir::new("prefs-newer");
-        let future = r#"{"version": 2, "side": "left", "theme": "neon"}"#;
+        let future = r#"{"version": 3, "side": "left", "theme": "neon"}"#;
         dir.write(FILE, future);
         let store = Store::load(Some(dir.path().into()));
         assert_eq!(store.status(), LoadStatus::NewerVersion);
@@ -353,11 +638,28 @@ mod tests {
     }
 
     #[test]
-    fn unknown_fields_of_the_current_version_are_tolerated() {
-        let text = r#"{"version": 1, "side": "left", "monitor": null,
-            "providers": {"codex": true, "claudeCode": true}, "launchAtStartup": false,
-            "addedLater": 5}"#;
-        assert_eq!(parse(text).unwrap().side, Side::Left);
+    fn unknown_top_level_fields_of_the_current_version_are_tolerated() {
+        let mut value = serde_json::to_value(valid()).unwrap();
+        value["addedLater"] = json!(5);
+        assert_eq!(parse(&value.to_string()).unwrap().0, valid());
+        // And in a v1 document.
+        let v1 = V1.replace("\"version\": 1,", "\"version\": 1, \"addedLater\": 5,");
+        assert_eq!(parse(&v1).unwrap().0.side, Side::Left);
+    }
+
+    #[test]
+    fn zero_visible_providers_is_a_valid_choice() {
+        let mut none = valid();
+        for provider in Provider::ALL {
+            match provider {
+                Provider::Codex => none.providers.codex.enabled = false,
+                Provider::ClaudeCode => none.providers.claude_code.enabled = false,
+                Provider::Gemini => none.providers.gemini.enabled = false,
+                Provider::Grok => none.providers.grok.enabled = false,
+            }
+        }
+        let saved = none.validate().unwrap();
+        assert!(saved.providers.visible().is_empty());
     }
 
     #[test]
@@ -365,19 +667,32 @@ mod tests {
         let dir = TempDir::new("prefs-invalid");
         let store = Store::load(Some(dir.path().into()));
         store.set(valid()).unwrap();
-        let none = Preferences {
-            providers: Providers {
-                codex: false,
-                claude_code: false,
-            },
-            ..valid()
+        let mut threshold = valid();
+        threshold.notifications.thresholds = vec![42];
+        assert!(store.set(threshold).is_err());
+        let mut metric = valid();
+        metric.providers.grok.metric = Some("x".repeat(65));
+        assert!(store.set(metric).is_err());
+        let mut quiet = valid();
+        quiet.notifications.quiet = QuietHours {
+            enabled: true,
+            start: 600,
+            end: 600,
         };
-        assert!(store.set(none).is_err());
+        assert!(store.set(quiet).is_err());
         assert_eq!(store.get(), valid());
+
         let mut renamed = valid();
         renamed.monitor.as_mut().unwrap().name = format!("Tela\u{0}\n{}", "x".repeat(300));
         let saved = store.set(renamed).unwrap();
         assert_eq!(saved.monitor.unwrap().name.chars().count(), MAX_NAME);
+        // Thresholds are normalized, not refused, when only out of order.
+        let mut unordered = valid();
+        unordered.notifications.thresholds = vec![100, 70, 100];
+        assert_eq!(
+            store.set(unordered).unwrap().notifications.thresholds,
+            [70, 100]
+        );
     }
 
     #[test]

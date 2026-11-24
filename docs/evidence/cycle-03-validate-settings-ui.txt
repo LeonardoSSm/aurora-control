@@ -1,0 +1,25 @@
+# cycle-03-validate-settings-ui.txt · build 3144f04 + working tree · 2026-11-24 01:47 -03:00 · Windows 10.0.26300.0
+PASS  window: version and defaults  v0.3.0 Direita startup=false
+PASS  ui side: saved  
+PASS  ui side: rail moved live  x 0
+PASS  ui provider: saved hidden  
+PASS  ui provider: single circle  height 52
+PASS  ui provider: zero hides the rail  
+PASS  ui provider: shown again from zero  
+PASS  startup on: Run value  "C:\Desenvolvimento\aurora-control\src-tauri\target\debug\aurora-control.exe"
+PASS  startup on: saved and shown  
+PASS  failed save: error shown  Acesso negado. (os error 5)
+PASS  failed save: Run value restored  
+PASS  failed save: preference unchanged  
+PASS  failed save: window shows stored state  
+PASS  failed save: no temporary file left  
+PASS  mismatch: reported  A preferência está ativa, mas o Windows não tem a entrada deste aplicativo.Corrigir
+PASS  mismatch: fixed  
+PASS  startup off: Run value removed  
+PASS  startup off: saved  
+PASS  restart: rail on the saved side  x 0
+PASS  restart: single circle kept  height 52
+PASS  restart: window shows saved choices  
+PASS  ui provider: shown again  height 118
+PASS  cleanup: Run value as before  
+Summary: 23/23 passed

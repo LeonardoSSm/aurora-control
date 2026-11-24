@@ -38,7 +38,7 @@ pub enum Job {
     SetSide(Side),
     Motion {
         generation: u32,
-        shifts: [u8; 2],
+        shifts: super::position::Shifts,
         reply: Reply,
     },
     ShowSummary {

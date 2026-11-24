@@ -38,6 +38,8 @@ const usage: Usage = {
   checkedAt: "2026-11-23T17:55:00Z",
   issue: null,
   refreshing: false,
+  selectedMetric: null,
+  metricMissing: false,
 };
 
 describe("I03 · out-of-order delivery", () => {

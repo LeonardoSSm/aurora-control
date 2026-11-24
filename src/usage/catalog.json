@@ -1,0 +1,48 @@
+[
+  {
+    "id": "codex",
+    "name": "Codex",
+    "vendor": "OpenAI",
+    "defaultEnabled": true,
+    "refreshSeconds": 300,
+    "integration": "live",
+    "capabilities": ["subscriptionWindows", "credits", "sessionLogFallback"],
+    "reconnect": "Entre novamente com “codex login”."
+  },
+  {
+    "id": "claudeCode",
+    "name": "Claude Code",
+    "vendor": "Anthropic",
+    "defaultEnabled": true,
+    "refreshSeconds": 300,
+    "integration": "live",
+    "capabilities": [
+      "subscriptionWindows",
+      "modelQuotas",
+      "credits",
+      "localActivity",
+      "diagnostics"
+    ],
+    "reconnect": "Autentique-se novamente pelo Claude Code CLI para restaurar o monitoramento."
+  },
+  {
+    "id": "gemini",
+    "name": "Gemini",
+    "vendor": "Google",
+    "defaultEnabled": false,
+    "refreshSeconds": 300,
+    "integration": "authOnly",
+    "capabilities": ["diagnostics"],
+    "reconnect": "Entre novamente executando “gemini” e escolhendo “Login with Google”."
+  },
+  {
+    "id": "grok",
+    "name": "Grok",
+    "vendor": "xAI",
+    "defaultEnabled": false,
+    "refreshSeconds": 300,
+    "integration": "gated",
+    "capabilities": ["subscriptionWindows", "credits", "diagnostics"],
+    "reconnect": "Entre novamente com “grok login”."
+  }
+]

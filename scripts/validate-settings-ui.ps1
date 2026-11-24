@@ -9,7 +9,8 @@
   127.0.0.1, then clicks the actual controls through scripts/cdp-eval.mjs.
   Checks the saved file, the per-user Run value and the rail geometry.
 
-  The preferences folder is backed up and restored. The Run value
+  Preferences live in a temporary AURORA_CONFIG_DIR (debug builds only), never
+  in the user's %APPDATA%. The Run value
   "Aurora Control" is recorded first and put back exactly as it was (absent
   or with its previous command). Run with PowerShell 7 (pwsh) and Node 22+
   in an interactive session.
@@ -49,7 +50,10 @@ function Check([string] $name, [bool] $ok, [string] $detail = '') {
 
 $Exe = (Resolve-Path $Exe).Path
 $cdp = Join-Path $PSScriptRoot 'cdp-eval.mjs'
-$dir = Join-Path $env:APPDATA 'app.auroracontrol.desktop'
+# Debug builds keep preferences in AURORA_CONFIG_DIR: the user's real
+# %APPDATA% folder is never read or written by this script.
+$dir = Join-Path ([IO.Path]::GetTempPath()) ('aurora-config-' + [guid]::NewGuid())
+$env:AURORA_CONFIG_DIR = $dir
 $file = Join-Path $dir 'preferences.json'
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $value = 'Aurora Control'
@@ -59,9 +63,9 @@ function Read-Run { (Get-ItemProperty $runKey -Name $value -ErrorAction Silently
 function Read-Saved { Get-Content $file -Raw | ConvertFrom-Json }
 
 $runBefore = Read-Run
-$backup = Join-Path ([IO.Path]::GetTempPath()) ('aurora-prefs-backup-' + [guid]::NewGuid())
-$existed = Test-Path $dir
-if ($existed) { Copy-Item $dir $backup -Recurse }
+$backup = $null
+$existed = $false
+
 $profile = Join-Path ([IO.Path]::GetTempPath()) ('aurora-settings-ui-' + [guid]::NewGuid())
 $env:WEBVIEW2_USER_DATA_FOLDER = Join-Path $profile 'webview'
 $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=$Port"
@@ -134,7 +138,7 @@ try {
 
     $run = Start-App
     $ui = Invoke-Page 'return state();'
-    Check 'window: version and defaults' ($ui.version -eq 'v0.2.0' -and $ui.side -eq 'Direita' -and $ui.startup -eq 'false' -and $ui.codex -eq 'true') ("{0} {1} startup={2}" -f $ui.version, $ui.side, $ui.startup)
+    Check 'window: version and defaults' ($ui.version -eq 'v0.3.0' -and $ui.side -eq 'Direita' -and $ui.startup -eq 'false' -and $ui.codex -eq 'true') ("{0} {1} startup={2}" -f $ui.version, $ui.side, $ui.startup)
 
     # Side through the UI: saved and applied live.
     $ui = Invoke-Page 'button("Esquerda").click(); await settled(); return state();'
@@ -146,10 +150,16 @@ try {
     $ui = Invoke-Page 'control("Mostrar Codex").click(); await settled(); return state();'
     $rect = Get-RailRect $run
     $scale = ($rect.Right - $rect.Left) / 60.0
-    Check 'ui provider: saved hidden' ($ui.codex -eq 'false' -and -not (Read-Saved).providers.codex)
+    Check 'ui provider: saved hidden' ($ui.codex -eq 'false' -and -not (Read-Saved).providers.codex.enabled)
     Check 'ui provider: single circle' ([math]::Abs(($rect.Bottom - $rect.Top) - 52 * $scale) -le 1) ("height {0}" -f ($rect.Bottom - $rect.Top))
-    $ui = Invoke-Page 'return { disabled: control("Mostrar Claude Code").disabled };'
-    Check 'ui provider: last one locked' ($ui.disabled -eq $true)
+    # Hiding the last provider is allowed (0.3.0): the rail hides, the window
+    # explains it, and showing it again brings the rail back.
+    $ui = Invoke-Page 'control("Mostrar Claude Code").click(); await settled(); return { claude: state().claude, note: document.body.textContent.includes("Nenhum provedor ativo") };'
+    Start-Sleep -Milliseconds 600
+    Check 'ui provider: zero hides the rail' (($ui.claude -eq 'false') -and $ui.note -and -not [WinUi]::IsWindowVisible($run.Rail))
+    $ui = Invoke-Page 'control("Mostrar Claude Code").click(); await settled(); return state();'
+    Start-Sleep -Milliseconds 600
+    Check 'ui provider: shown again from zero' (($ui.claude -eq 'true') -and [WinUi]::IsWindowVisible($run.Rail))
 
     # Start with Windows: the Run value and the preference agree.
     $ui = Invoke-Page 'control("Iniciar com o Windows").click(); await settled(); return state();'

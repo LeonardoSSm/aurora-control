@@ -1,5 +1,5 @@
 import { providerNames } from "./model";
-import type { Issue, Provider, Snapshot, Usage } from "./model";
+import type { BlockReason, Issue, Provider, Snapshot, Usage } from "./model";
 
 export type RailState =
   { status: "loading" | "error" } | { status: "ready"; snapshot: Snapshot };
@@ -27,6 +27,15 @@ export function clampPercent(value: number) {
 }
 
 export function meter(usage?: Usage, now?: Date) {
+  // The chosen metric is gone: show no value rather than another metric.
+  if (usage?.metricMissing) {
+    return {
+      percent: 0,
+      text: "—",
+      label: "Métrica escolhida indisponível na última leitura",
+      tone: "none" as Tone,
+    };
+  }
   if (!usage || usage.status === "unavailable") {
     return {
       percent: 0,
@@ -165,30 +174,67 @@ export function formatTokens(tokens: number) {
   return `${compact.format(tokens)} tokens`;
 }
 
+const missingText: Record<Provider, string> = {
+  codex: "Nenhuma sessão do Codex encontrada. Entre com “codex login”.",
+  claudeCode:
+    "Nenhuma sessão do Claude Code encontrada. Execute “claude” no terminal.",
+  gemini:
+    "Nenhuma sessão do Gemini CLI encontrada. Execute “gemini” e escolha “Login with Google”.",
+  grok: "Nenhuma sessão do Grok Build encontrada. Entre com “grok login”.",
+};
+
+const expiredText: Record<Provider, string> = {
+  codex: "A sessão do Codex expirou. Abra o Codex para renová-la.",
+  claudeCode:
+    "A sessão do Claude Code expirou. Execute “claude” no terminal para renová-la.",
+  gemini: "A sessão do Gemini CLI expirou. Execute “gemini” para renová-la.",
+  grok: "A sessão do Grok Build expirou. Abra o Grok Build para renová-la.",
+};
+
+const unavailableText: Record<Provider, string> = {
+  codex:
+    "As credenciais do Codex estão no armazenamento do sistema, que o Aurora Control não lê.",
+  claudeCode:
+    "Credencial do Claude Code indisponível no arquivo local. O login pode estar no app Claude Desktop; execute “claude” no terminal para usar a sessão do CLI.",
+  gemini:
+    "O Gemini CLI guarda a credencial no cofre do sistema ou em arquivo cifrado, que o Aurora Control não lê.",
+  grok: "Credencial do Grok Build indisponível no arquivo local.",
+};
+
+const unsupportedText: Record<Provider, string> = {
+  codex: "Login por chave de API: o Codex não expõe cotas de assinatura.",
+  claudeCode:
+    "Login por chave de API ou token restrito: cotas e custos não são expostos localmente.",
+  gemini:
+    "Login por chave da Gemini API ou Vertex AI: limites de API e de projeto não são cotas de assinatura.",
+  grok: "Login por chave de API da xAI: limites de API pertencem à equipe e não são cotas de assinatura.",
+};
+
+const blockedText: Record<BlockReason, string> = {
+  providerTerms:
+    "Sessão detectada. Os termos do Gemini CLI proíbem que outro software use esse login para acessar o serviço, então o Aurora Control não consulta as cotas.",
+  termsUnverified:
+    "Sessão detectada. A consulta de créditos fica desativada até a verificação dos termos de uso da xAI.",
+};
+
 /** What went wrong, in terms of what the user can do about it. */
 export function issueText(issue: Issue, provider: Provider, now: Date) {
   const name = providerNames[provider];
   switch (issue.code) {
     case "authMissing":
-      return provider === "codex"
-        ? "Nenhuma sessão do Codex encontrada. Entre com “codex login”."
-        : "Nenhuma sessão do Claude Code encontrada. Execute “claude” no terminal.";
+      return missingText[provider];
     case "authExpired":
-      return provider === "codex"
-        ? "A sessão do Codex expirou. Abra o Codex para renová-la."
-        : "A sessão do Claude Code expirou. Execute “claude” no terminal para renová-la.";
+      return expiredText[provider];
     case "authRejected":
       return `O ${name} recusou a sessão local. Entre novamente.`;
     case "credentialsUnavailable":
-      return provider === "codex"
-        ? "As credenciais do Codex estão no armazenamento do sistema, que o Aurora Control não lê."
-        : "Credencial do Claude Code indisponível no arquivo local. O login pode estar no app Claude Desktop; execute “claude” no terminal para usar a sessão do CLI.";
+      return unavailableText[provider];
     case "credentialsInvalid":
       return `O arquivo de credenciais do ${name} não pôde ser lido. Ele pode estar sendo regravado; uma nova verificação ocorrerá em breve.`;
     case "unsupported":
-      return provider === "codex"
-        ? "Login por chave de API: o Codex não expõe cotas de assinatura."
-        : "Login por chave de API ou token restrito: cotas e custos não são expostos localmente.";
+      return unsupportedText[provider];
+    case "sourceBlocked":
+      return blockedText[issue.reason];
     case "rateLimited":
       return issue.retryAt
         ? `Limite de consultas atingido. Nova tentativa ${formatMoment(issue.retryAt, now)}.`

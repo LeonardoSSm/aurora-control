@@ -1,0 +1,21 @@
+# cycle-03-validate-overlay-right.txt · build 3144f04 + working tree · 2026-11-24 01:46 -03:00 · Windows 10.0.26300.0
+PASS  rail visible  hwnd 28314270
+PASS  summary hidden at start  
+PASS  rail geometry  (1860,457) 60x118
+PASS  no-activate tool window  0x8000198
+PASS  cursor moved  (1914,483)
+PASS  summary opens on hover (cold)  308 ms after the cursor arrived
+PASS  focus unchanged on hover  fg 11731786 pid 10284 overlay=False
+PASS  summary opens inward  (1556,361)-(1852,606)
+PASS  summary click-through  
+PASS  closes after leaving  402 ms after the cursor left
+PASS  summary opens on hover (warm)  200 ms after the cursor arrived
+PASS  sweep does not open  
+PASS  rail corner click-through  
+PASS  switch keeps the card open  
+PASS  focus unchanged after switch  fg 11731786 pid 10284 overlay=False
+PASS  controller batches traced  80 batches
+PASS  no re-entrant batch  
+PASS  single owner thread  
+PASS  batch latency  median 0,12 ms, max 117,84 ms
+Summary: 19/19 passed

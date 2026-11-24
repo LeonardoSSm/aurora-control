@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod alerts;
 mod autostart;
 mod instance;
 mod preferences;
@@ -25,16 +26,22 @@ fn main() {
     };
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
-            app.manage(preferences::Store::load(app.path().app_config_dir().ok()));
+            let config =
+                preferences::debug_config_dir().or_else(|| app.path().app_config_dir().ok());
+            app.manage(preferences::Store::load(config));
             let service = usage::Service::from_environment();
             let demo = service.is_demo();
             app.manage(service);
+            app.manage(alerts::Alerts::default());
             windows::setup(app)?;
             tray::setup(app, demo)?;
             let handle = app.handle().clone();
-            app.state::<usage::Service>()
-                .start(Box::new(move || windows::usage_changed(&handle)));
+            app.state::<usage::Service>().start(Box::new(move || {
+                windows::usage_changed(&handle);
+                alerts::evaluate(&handle);
+            }));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -47,7 +54,8 @@ fn main() {
             windows::show_summary,
             settings::get_settings,
             settings::set_preferences,
-            settings::get_claude_diagnostics,
+            settings::get_diagnostics,
+            alerts::send_test_notification,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Aurora Control");
@@ -71,7 +79,12 @@ mod ipc_tests {
         "rail_pointer",
     ];
     const SUMMARY: &[&str] = &["summary_ready", "show_summary"];
-    const SETTINGS: &[&str] = &["get_settings", "set_preferences", "get_claude_diagnostics"];
+    const SETTINGS: &[&str] = &[
+        "get_settings",
+        "set_preferences",
+        "get_diagnostics",
+        "send_test_notification",
+    ];
 
     fn app() -> tauri::App<MockRuntime> {
         mock_builder()
@@ -129,6 +142,8 @@ mod ipc_tests {
                 "plugin:webview|create_webview_window",
                 "plugin:event|emit",
                 "plugin:path|resolve_directory",
+                "plugin:notification|notify",
+                "plugin:notification|request_permission",
             ] {
                 assert!(!allowed(&window, command), "{label} → {command}");
             }

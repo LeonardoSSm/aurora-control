@@ -6,7 +6,8 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 
 use super::model::{
-    ConsumptionWindow, DiagnosticRow, LocalActivity, Origin, Provider, Quota, QuotaKind, Source,
+    BlockReason, ConsumptionWindow, DiagnosticRow, LocalActivity, Origin, Provider, Quota,
+    QuotaKind, Source,
 };
 use super::session::{Fingerprint, Session};
 
@@ -48,6 +49,9 @@ pub enum FetchError {
         status: u16,
         retry_after: Option<Duration>,
     },
+    /// The sign-in is known locally, but there is no quota source this app
+    /// may query. Decided without contacting the provider.
+    SourceBlocked(BlockReason),
 }
 
 /// Everything an adapter learned during one attempt.
@@ -125,8 +129,27 @@ pub fn primary_index(quotas: &[Quota]) -> Option<usize> {
         .map(|(index, _)| index)
 }
 
-pub fn split_primary(mut quotas: Vec<Quota>) -> (Option<(u8, ConsumptionWindow)>, Vec<Quota>) {
-    match primary_index(&quotas) {
+/// The index of the metric chosen by the user: a window with that exact id.
+/// Unlike [`primary_index`], ineligible windows qualify, because the user
+/// picked them by name. Credits never do: they are not a consumption window.
+pub fn selected_index(quotas: &[Quota], id: &str) -> Option<usize> {
+    quotas
+        .iter()
+        .position(|quota| quota.kind == QuotaKind::Window && quota.id == id)
+}
+
+/// Splits off the ring's metric: the user's choice when `selected` is set,
+/// otherwise the automatic one. A chosen metric that is absent yields no
+/// primary: the semantics of the ring never change silently.
+pub fn split_metric(
+    mut quotas: Vec<Quota>,
+    selected: Option<&str>,
+) -> (Option<(u8, ConsumptionWindow)>, Vec<Quota>) {
+    let index = match selected {
+        Some(id) => selected_index(&quotas, id),
+        None => primary_index(&quotas),
+    };
+    match index {
         Some(index) => {
             let primary = quotas.remove(index);
             (
@@ -145,6 +168,11 @@ pub fn split_primary(mut quotas: Vec<Quota>) -> (Option<(u8, ConsumptionWindow)>
         }
         None => (None, quotas),
     }
+}
+
+#[cfg(test)]
+pub fn split_primary(quotas: Vec<Quota>) -> (Option<(u8, ConsumptionWindow)>, Vec<Quota>) {
+    split_metric(quotas, None)
 }
 
 /// A provider percentage, or `None` outside the documented 0–100 domain.

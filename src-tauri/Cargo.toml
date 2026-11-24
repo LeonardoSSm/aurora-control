@@ -1,6 +1,6 @@
 [package]
 name = "aurora-control"
-version = "0.2.0"
+version = "0.3.0"
 description = "Indicadores de utilização de ferramentas de IA"
 edition = "2024"
 
@@ -13,6 +13,7 @@ chrono = { version = "0.4.45", default-features = false, features = ["std", "clo
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "~2.11.5", features = ["tray-icon"] }
+tauri-plugin-notification = "~2.4.0"
 ureq = { version = "3.5.2", default-features = false, features = ["native-tls"] }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",

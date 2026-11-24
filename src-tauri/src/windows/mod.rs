@@ -33,9 +33,11 @@ use crate::usage::{Provider, Service, UsageUpdate};
 use controller::{Controller, Job};
 use hover::{Action, Hover, Selection};
 use position::{
-    Layout, RAIL_WIDTH, Rect, SLIDE, SUMMARY_MIN_HEIGHT, SUMMARY_WIDTH, anchor, layout_with,
-    rail_height,
+    Layout, MAX_INDICATORS, RAIL_WIDTH, Rect, SLIDE, SUMMARY_MIN_HEIGHT, SUMMARY_WIDTH, Shifts,
+    anchor, capacity, layout_with, rail_height,
 };
+
+const COLLAPSED: Shifts = [0; MAX_INDICATORS];
 
 pub use position::Side;
 
@@ -91,6 +93,9 @@ pub struct Placement {
     pub monitor: Option<String>,
     /// The preferred monitor is disconnected: the primary is used instead.
     pub fallback: bool,
+    /// Indicators drawn. Fewer than the enabled providers only when the work
+    /// area cannot fit them all (see `position::capacity`).
+    pub shown: usize,
 }
 
 struct WindowState {
@@ -99,10 +104,13 @@ struct WindowState {
     /// Physical bounds of the visible summary, for the hover zone.
     summary: Option<Rect>,
     /// Slide offsets of the last frame Windows accepted.
-    shifts: [u8; 2],
+    shifts: Shifts,
     /// The geometry the rail was last placed with.
     geometry: Option<Geometry>,
     monitor: Placement,
+    /// Providers the user enabled, in catalog order. `placement.providers`
+    /// is the part of it that fits the work area (see `position::capacity`).
+    enabled: Vec<Provider>,
 }
 
 impl WindowState {
@@ -140,18 +148,21 @@ pub fn setup(app: &App) -> tauri::Result<()> {
     // Environment > preferences > defaults.
     let (side, _) = preferences::effective_side(&stored);
     let providers = stored.providers.visible();
-    app.state::<Service>().set_visible(&providers);
+    let service = app.state::<Service>();
+    service.set_visible(&providers);
+    service.select_metrics(&stored.providers.metrics());
     app.manage(Mutex::new(WindowState {
         placement: RailPlacement {
             side,
             generation: 0,
-            providers,
+            providers: providers.clone(),
         },
         hover: Hover::default(),
         summary: None,
-        shifts: [0; 2],
+        shifts: COLLAPSED,
         geometry: None,
         monitor: Placement::default(),
+        enabled: providers,
     }));
     let controller = Arc::new(Controller::default());
     app.manage(Arc::clone(&controller));
@@ -162,7 +173,7 @@ pub fn setup(app: &App) -> tauri::Result<()> {
         "index.html",
         "Aurora Control",
         RAIL_WIDTH,
-        rail_height(2),
+        rail_height(MAX_INDICATORS),
     )?;
     let summary = create(
         app,
@@ -201,7 +212,7 @@ pub fn setup(app: &App) -> tauri::Result<()> {
     }
 
     // Setup runs on the main thread outside any window callback.
-    place_rail(app.handle(), side, true)
+    place_rail(app.handle(), side, stored.rail_visible)
 }
 
 fn create(
@@ -251,7 +262,8 @@ fn target_geometry(app: &AppHandle) -> tauri::Result<(Geometry, Placement)> {
     let monitors = monitors::enumerate();
     let (monitor, fallback) = monitors::choose(&monitors, preferred.as_deref())
         .ok_or_else(|| io::Error::other("No monitor available"))?;
-    let slots = state(app).placement.providers.len();
+    let enabled = state(app).enabled.len();
+    let slots = enabled.min(capacity(monitor.work.height, monitor.scale));
     Ok((
         Geometry {
             work: monitor.work,
@@ -261,6 +273,7 @@ fn target_geometry(app: &AppHandle) -> tauri::Result<(Geometry, Placement)> {
         Placement {
             monitor: Some(monitor.id.clone()),
             fallback,
+            shown: slots,
         },
     ))
 }
@@ -279,16 +292,29 @@ pub fn placement(app: &AppHandle) -> Placement {
 }
 
 /// Places the collapsed rail with a fresh geometry snapshot. Main thread.
+/// With no visible provider the rail is hidden and has an empty region: the
+/// tray and the settings window stay available.
 fn place_rail(app: &AppHandle, side: Side, show: bool) -> tauri::Result<()> {
     let rail = window(app, RAIL)?;
     let (geometry, monitor) = target_geometry(app)?;
-    let layout = geometry.layout(side, 0, 0);
-    native::set_indicator_regions(&rail, layout.rail, &layout.visible_circles([0; 2]))?;
-    native::place(&rail, layout.rail, show)?;
+    {
+        // The indicators drawn are the enabled ones that fit, in order.
+        let mut state = state(app);
+        let shown: Vec<Provider> = state.enabled.iter().take(geometry.slots).copied().collect();
+        state.placement.providers = shown;
+    }
+    if geometry.slots == 0 {
+        native::set_indicator_regions(&rail, Rect::default(), &[])?;
+        native::hide(&rail)?;
+    } else {
+        let layout = geometry.layout(side, 0, 0);
+        native::set_indicator_regions(&rail, layout.rail, &layout.visible_circles(COLLAPSED))?;
+        native::place(&rail, layout.rail, show)?;
+    }
     let mut state = state(app);
     state.geometry = Some(geometry);
     state.monitor = monitor;
-    state.shifts = [0; 2];
+    state.shifts = COLLAPSED;
     Ok(())
 }
 
@@ -297,10 +323,26 @@ fn publish_placement(app: &AppHandle, side: Side) -> tauri::Result<()> {
         let mut state = state(app);
         state.placement.side = side;
         state.placement.generation = state.placement.generation.wrapping_add(1);
-        state.shifts = [0; 2];
+        state.shifts = COLLAPSED;
         state.placement.clone()
     };
     app.emit_to(RAIL, PLACEMENT_EVENT, placement)
+}
+
+/// Remembers whether the rail is shown, so a restart keeps the choice.
+fn remember_rail_visible(app: &AppHandle, visible: bool) {
+    let store = app.state::<Store>();
+    let current = store.get();
+    if current.rail_visible == visible {
+        return;
+    }
+    let saved = store.set(preferences::Preferences {
+        rail_visible: visible,
+        ..current
+    });
+    if let Err(error) = saved {
+        eprintln!("Aurora Control: could not save the rail visibility: {error}");
+    }
 }
 
 /// Expands `provider` (or collapses everything) and selects its summary.
@@ -326,12 +368,20 @@ fn activate(app: &AppHandle, provider: Option<Provider>) -> tauri::Result<()> {
 
 fn toggle_now(app: &AppHandle) -> tauri::Result<()> {
     let rail = window(app, RAIL)?;
-    let side = state(app).placement.side;
+    let (side, nothing_enabled) = {
+        let state = state(app);
+        (state.placement.side, state.enabled.is_empty())
+    };
     if native::is_visible(&rail)? {
         activate(app, None)?;
         native::hide(&rail)?;
+        remember_rail_visible(app, false);
         publish_placement(app, side)
+    } else if nothing_enabled {
+        // Nothing to show: the settings window is where providers are enabled.
+        open_settings(app)
     } else {
+        remember_rail_visible(app, true);
         place_rail(app, side, true)
     }
 }
@@ -368,14 +418,32 @@ fn check_topology(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Applies saved preferences: side, monitor and visible providers.
+/// Applies saved preferences: side, monitor, visible providers, their ring
+/// metrics and the rail visibility. Enabling, disabling or reordering
+/// providers collapses the rail first and re-places it with a new
+/// generation, so a hover in progress can never target a slot that moved.
 fn apply_preferences(app: &AppHandle) -> tauri::Result<()> {
     let stored = app.state::<Store>().get();
     let (side, _) = preferences::effective_side(&stored);
     let providers = stored.providers.visible();
-    app.state::<Service>().set_visible(&providers);
-    state(app).placement.providers = providers;
-    relayout(app, side)
+    let service = app.state::<Service>();
+    service.set_visible(&providers);
+    service.select_metrics(&stored.providers.metrics());
+    state(app).enabled = providers;
+    activate(app, None)?;
+    place_rail(app, side, stored.rail_visible)?;
+    if !stored.rail_visible {
+        native::hide(&window(app, RAIL)?)?;
+    }
+    publish_placement(app, side)?;
+    // A new ring metric changes what the snapshot shows without any new
+    // reading: publish it now instead of at the next refresh.
+    usage_changed(app);
+    // A disabled worker publishes nothing, so the alert engine learns about
+    // a newly disabled provider here: it drops that provider's state, and a
+    // later re-enable starts from a fresh baseline.
+    crate::alerts::evaluate(app);
+    Ok(())
 }
 
 /// Opens the settings window, or brings it forward.
@@ -445,7 +513,7 @@ pub fn usage_changed(app: &AppHandle) {
 }
 
 /// Applies one animation frame, if the placement is still current.
-fn motion(app: &AppHandle, generation: u32, shifts: [u8; 2]) -> tauri::Result<bool> {
+fn motion(app: &AppHandle, generation: u32, shifts: Shifts) -> tauri::Result<bool> {
     let (current, side) = {
         let state = state(app);
         (state.placement.generation, state.placement.side)
@@ -634,11 +702,15 @@ pub fn get_rail_placement(app: AppHandle) -> RailPlacement {
 pub async fn set_rail_motion(
     app: AppHandle,
     generation: u32,
-    shifts: [u8; 2],
+    shifts: Vec<u8>,
 ) -> Result<bool, String> {
-    if shifts.iter().any(|shift| *shift > SLIDE) {
+    if shifts.len() > MAX_INDICATORS || shifts.iter().any(|shift| *shift > SLIDE) {
         return Err("Invalid indicator offset".into());
     }
+    // One offset per visible slot; the remaining slots stay collapsed.
+    let mut padded = COLLAPSED;
+    padded[..shifts.len()].copy_from_slice(&shifts);
+    let shifts = padded;
     if state(&app).placement.generation != generation {
         return Ok(false);
     }

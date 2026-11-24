@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 
-use super::adapter::{FetchError, Fetched, Outcome, rfc3339, split_primary};
+use super::adapter::{FetchError, Fetched, Outcome, rfc3339, split_metric};
 use super::model::{Issue, LocalActivity, Origin, Provider, Quota, Reading, Source, Usage};
 use super::session::Session;
 use super::time::{after, bounded};
@@ -34,6 +34,16 @@ pub struct Policy {
     pub backoff_max: Duration,
     /// Minimum wait after HTTP 429, even without `Retry-After`.
     pub rate_limit_floor: Duration,
+}
+
+impl Policy {
+    /// The default policy with the provider's refresh cadence from the catalog.
+    pub fn for_provider(provider: Provider) -> Self {
+        Self {
+            interval: super::catalog::refresh_interval(provider),
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for Policy {
@@ -116,6 +126,8 @@ pub struct Tracker {
     not_before: Option<Instant>,
     last_attempt: Option<DateTime<Utc>>,
     in_flight: bool,
+    /// The metric chosen for the ring, or `None` for the automatic choice.
+    metric: Option<String>,
 }
 
 impl Tracker {
@@ -137,7 +149,20 @@ impl Tracker {
             not_before: None,
             last_attempt: None,
             in_flight: false,
+            metric: None,
         }
+    }
+
+    /// Chooses the ring's metric: `None` for the automatic choice, or a quota
+    /// id. Only changes presentation: nothing is fetched again.
+    pub fn select_metric(&mut self, metric: Option<String>) {
+        self.metric = metric;
+    }
+
+    /// The verified account of the current session, if any. Process-local:
+    /// used to keep alerts of one account from reaching another.
+    pub fn identity(&self) -> Option<super::session::Fingerprint> {
+        self.session.identity()
     }
 
     #[cfg(test)]
@@ -310,7 +335,8 @@ impl Tracker {
             | FetchError::AuthExpired
             | FetchError::Unsupported
             | FetchError::CredentialsUnavailable
-            | FetchError::CredentialsInvalid => (policy.local_recheck, policy.manual_gap, None),
+            | FetchError::CredentialsInvalid
+            | FetchError::SourceBlocked(_) => (policy.local_recheck, policy.manual_gap, None),
             // The request never got an answer: retrying soon is harmless.
             FetchError::Network | FetchError::Timeout => (backoff, policy.manual_gap, None),
             // The same credential fails again: the user waits like the
@@ -359,6 +385,7 @@ impl Tracker {
             FetchError::Timeout => Issue::Timeout,
             FetchError::Malformed(_) => Issue::Malformed,
             FetchError::Http { status, .. } => Issue::Http { status, retry_at },
+            FetchError::SourceBlocked(reason) => Issue::SourceBlocked { reason },
         });
     }
 
@@ -422,7 +449,19 @@ impl Tracker {
         wake
     }
 
+    /// The state shown by the rail, with the user's ring metric.
     pub fn usage(&self, now: Now) -> Usage {
+        self.view(now, self.metric.as_deref())
+    }
+
+    /// The same state with the automatic metric. The ring metric is a
+    /// presentation choice: whether the data is fresh and which windows were
+    /// measured must not depend on it, so the alert engine reads this view.
+    pub fn automatic_usage(&self, now: Now) -> Usage {
+        self.view(now, None)
+    }
+
+    fn view(&self, now: Now, selected: Option<&str>) -> Usage {
         let good = self.shown();
         let quotas: Vec<Quota> = good
             .map(|good| {
@@ -432,7 +471,11 @@ impl Tracker {
                     .collect()
             })
             .unwrap_or_default();
-        let (primary, quotas) = split_primary(quotas);
+        // With data in hand, a chosen metric that is absent is reported as
+        // missing. Without any data, nothing can be said about it yet.
+        let has_data = !quotas.is_empty();
+        let (primary, quotas) = split_metric(quotas, selected);
+        let metric_missing = selected.is_some() && has_data && primary.is_none();
         let fresh = self.issue.is_none()
             && good
                 .is_some_and(|good| !elapsed(good.observed_at, now.utc, self.policy.stale_after));
@@ -458,6 +501,8 @@ impl Tracker {
             checked_at: self.last_attempt.map(rfc3339),
             issue: self.issue.clone(),
             refreshing: self.in_flight,
+            selected_metric: self.metric.clone(),
+            metric_missing,
         }
     }
 }
@@ -1224,5 +1269,133 @@ mod tests {
         // The backoff (until 1200 s) passes the age limit: the stale
         // transition at 900 s still wakes the worker.
         assert_eq!(tracker.next_wake(at(720)), at(900).instant);
+    }
+
+    #[test]
+    fn a_chosen_metric_replaces_the_automatic_choice() {
+        let mut tracker = tracker();
+        tracker.begin(at(0));
+        tracker.finish(ok(fetched(73, t0(), Origin::Api)), at(1));
+        // Automatic: the weekly window (73%) is the most consumed.
+        let usage = tracker.usage(at(2));
+        assert_eq!(usage.window.unwrap().id, "sevenDay");
+        assert_eq!(usage.selected_metric, None);
+
+        tracker.select_metric(Some("fiveHour".into()));
+        let usage = tracker.usage(at(2));
+        assert_eq!(usage.reading, Reading::Available { percent_used: 10 });
+        assert_eq!(usage.window.unwrap().id, "fiveHour");
+        assert_eq!(usage.selected_metric.as_deref(), Some("fiveHour"));
+        assert!(!usage.metric_missing);
+        // The other window is still listed.
+        assert_eq!(usage.quotas.len(), 1);
+        assert_eq!(usage.quotas[0].id, "sevenDay");
+    }
+
+    #[test]
+    fn a_missing_chosen_metric_is_reported_instead_of_switched() {
+        let mut tracker = tracker();
+        tracker.select_metric(Some("sevenDayOpus".into()));
+        // No data yet: nothing can be said about the metric.
+        assert!(!tracker.usage(at(0)).metric_missing);
+
+        tracker.begin(at(0));
+        tracker.finish(ok(fetched(73, t0(), Origin::Api)), at(1));
+        let usage = tracker.usage(at(2));
+        assert!(usage.metric_missing);
+        assert_eq!(usage.reading, Reading::Unavailable);
+        assert!(usage.window.is_none());
+        assert_eq!(usage.quotas.len(), 2, "every quota stays listed");
+
+        // Back to the automatic choice.
+        tracker.select_metric(None);
+        let usage = tracker.usage(at(2));
+        assert!(!usage.metric_missing);
+        assert_eq!(usage.reading, Reading::Available { percent_used: 73 });
+    }
+
+    #[test]
+    fn a_chosen_metric_that_renewed_awaits_a_new_reading() {
+        let mut tracker = tracker();
+        tracker.select_metric(Some("fiveHour".into()));
+        tracker.begin(at(0));
+        tracker.finish(ok(fetched(73, t0(), Origin::Api)), at(1));
+        // The five-hour window renews one hour after the observation.
+        let usage = tracker.usage(at(3_601));
+        let window = usage.window.unwrap();
+        assert_eq!(window.id, "fiveHour");
+        assert!(window.renewed);
+        assert_eq!(usage.reading, Reading::Stale { percent_used: 0 });
+    }
+
+    #[test]
+    fn a_blocked_source_is_a_local_state_that_never_reaches_the_network() {
+        let mut tracker = tracker();
+        tracker.begin(at(0));
+        tracker.finish(
+            Outcome {
+                session: account("A"),
+                account: Some("a•••@example.com".into()),
+                ..Outcome::failed(FetchError::SourceBlocked(
+                    crate::usage::model::BlockReason::ProviderTerms,
+                ))
+            },
+            at(0),
+        );
+        let usage = tracker.usage(at(1));
+        assert_eq!(usage.reading, Reading::Unavailable);
+        assert_eq!(
+            usage.issue,
+            Some(Issue::SourceBlocked {
+                reason: crate::usage::model::BlockReason::ProviderTerms
+            })
+        );
+        assert_eq!(usage.account.as_deref(), Some("a•••@example.com"));
+        // Re-checked like other local states, with no server wait.
+        assert_eq!(waited(&tracker, at(0)), 120);
+        assert!(tracker.should_fetch(at(20), true));
+    }
+
+    #[test]
+    fn the_refresh_cadence_comes_from_the_catalog() {
+        for provider in Provider::ALL {
+            assert_eq!(
+                Policy::for_provider(provider).interval,
+                crate::usage::catalog::refresh_interval(provider)
+            );
+        }
+    }
+
+    #[test]
+    fn the_alert_view_ignores_the_ring_metric() {
+        let mut tracker = tracker();
+        tracker.begin(at(0));
+        tracker.finish(ok(fetched(73, t0(), Origin::Api)), at(1));
+
+        // A chosen metric that vanished makes the ring show nothing...
+        tracker.select_metric(Some("sevenDayOpus".into()));
+        assert_eq!(tracker.usage(at(2)).reading, Reading::Unavailable);
+        // ...but the reading is still fresh and fully measured for alerts.
+        let view = tracker.automatic_usage(at(2));
+        assert_eq!(view.reading, Reading::Available { percent_used: 73 });
+        assert!(!view.metric_missing);
+        assert_eq!(view.quotas.len(), 1);
+
+        // A chosen window that renewed (60 s after the reading, well within
+        // its freshness): the ring awaits a reading, while the other window
+        // is still a fresh measurement for alerts.
+        let mut early = fetched(73, t0(), Origin::Api);
+        early.quotas[0].resets_at = Some(rfc3339(t0() + secs(60)));
+        let mut renewing = Tracker::new(Provider::Codex, Source::Live, Policy::default(), at(0));
+        renewing.begin(at(0));
+        renewing.finish(ok(early), at(1));
+        renewing.select_metric(Some("fiveHour".into()));
+        assert!(matches!(
+            renewing.usage(at(120)).reading,
+            Reading::Stale { .. }
+        ));
+        let view = renewing.automatic_usage(at(120));
+        assert_eq!(view.reading, Reading::Available { percent_used: 73 });
+        assert_eq!(view.window.unwrap().id, "sevenDay");
     }
 }

@@ -59,7 +59,7 @@ $env:AURORA_DEMO = $Demo
 $env:AURORA_SIDE = $Side
 $env:AURORA_TRACE = '1'
 $env:WEBVIEW2_USER_DATA_FOLDER = Join-Path $profile 'webview'
-$env:APPDATA = Join-Path $profile 'appdata'
+$env:AURORA_CONFIG_DIR = Join-Path $profile 'config'
 $before = [Win]::GetForegroundWindow()
 $original = New-Object Win+POINT
 [Win]::GetCursorPos([ref] $original) | Out-Null

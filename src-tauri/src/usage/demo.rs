@@ -1,6 +1,9 @@
 //! Fictitious readings for tests and visual validation. Enabled with
-//! `AURORA_DEMO=1`, or `AURORA_DEMO=<codex>,<claude>` to choose the primary
-//! percentages. Never touches the network or provider files.
+//! `AURORA_DEMO=1`, or `AURORA_DEMO=<codex>,<claude>,<gemini>,<grok>` to
+//! choose the primary percentages. Never touches the network or provider
+//! files. Every reading is marked `source: demo` and shown as a demonstration:
+//! the Gemini and Grok fixtures exist to validate the four-indicator layout,
+//! not to stand in for a quota source those providers do not have.
 
 use chrono::{DateTime, TimeDelta, Utc};
 
@@ -22,22 +25,24 @@ impl DemoAdapter {
     }
 
     /// Parses `AURORA_DEMO`. Returns `None` when demo mode is off.
-    pub fn from_env(value: Option<&str>) -> Option<[Self; 2]> {
+    pub fn from_env(value: Option<&str>) -> Option<Vec<Self>> {
         let value = value?.trim();
         if value.is_empty() || value == "0" {
             return None;
         }
-        let mut numbers = value.split(',').map(|part| part.trim().parse::<u8>().ok());
-        let codex = numbers
-            .next()
-            .flatten()
-            .filter(|_| value != "1")
-            .unwrap_or(64);
-        let claude = numbers.next().flatten().unwrap_or(37);
-        Some([
-            Self::new(Provider::Codex, codex),
-            Self::new(Provider::ClaudeCode, claude),
-        ])
+        let mut numbers = value
+            .split(',')
+            .map(|part| part.trim().parse::<u8>().ok().filter(|_| value != "1"));
+        let defaults = [64, 37, 82, 21];
+        Some(
+            Provider::ALL
+                .into_iter()
+                .zip(defaults)
+                .map(|(provider, default)| {
+                    Self::new(provider, numbers.next().flatten().unwrap_or(default))
+                })
+                .collect(),
+        )
     }
 }
 
@@ -109,6 +114,29 @@ impl UsageAdapter for DemoAdapter {
                     now + hour * 90,
                 ),
             ],
+            Provider::Gemini => vec![
+                window(
+                    "gemini-pro",
+                    "Diária · Gemini Pro",
+                    self.percent,
+                    1_440,
+                    now + hour * 9,
+                ),
+                window(
+                    "gemini-flash",
+                    "Diária · Gemini Flash",
+                    secondary,
+                    1_440,
+                    now + hour * 9,
+                ),
+            ],
+            Provider::Grok => vec![window(
+                "grok-credits",
+                "Créditos semanais",
+                self.percent,
+                10_080,
+                now + hour * 100,
+            )],
         };
         let session = Session::account(&["demo", &format!("{:?}", self.provider)], "demo");
         Outcome {
