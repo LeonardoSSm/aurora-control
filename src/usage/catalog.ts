@@ -2,10 +2,10 @@
 // catalog.json: one list of providers for both languages.
 import entries from "./catalog.json";
 
-export type Provider = "codex" | "claudeCode" | "gemini" | "grok";
+export type Provider = "codex" | "claudeCode" | "antigravity" | "grok";
 
 /** How far the provider's data source goes (see docs/provider-compatibility.md). */
-export type Integration = "live" | "authOnly" | "gated";
+export type Integration = "live" | "cli" | "gated";
 
 export type Capability =
   | "subscriptionWindows"

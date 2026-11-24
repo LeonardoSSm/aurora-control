@@ -1,6 +1,6 @@
 [package]
 name = "aurora-control"
-version = "0.3.0"
+version = "0.3.1"
 description = "Indicadores de utilização de ferramentas de IA"
 edition = "2024"
 

@@ -30,7 +30,8 @@ export function attention(
   usage: Usage | undefined,
 ): "issue" | "blocked" | null {
   if (!usage || usage.source === "demo") return null;
-  if (usage.issue?.code === "sourceBlocked") return "blocked";
+  if (usage.issue?.code === "sourceBlocked")
+    return usage.issue.reason === "cliSafety" ? "issue" : "blocked";
   if (usage.metricMissing) return "issue";
   if (usage.issue && usage.status !== "available") return "issue";
   return null;

@@ -26,14 +26,14 @@
     "reconnect": "Autentique-se novamente pelo Claude Code CLI para restaurar o monitoramento."
   },
   {
-    "id": "gemini",
-    "name": "Gemini",
+    "id": "antigravity",
+    "name": "Antigravity",
     "vendor": "Google",
     "defaultEnabled": false,
-    "refreshSeconds": 300,
-    "integration": "authOnly",
-    "capabilities": ["diagnostics"],
-    "reconnect": "Entre novamente executando “gemini” e escolhendo “Login with Google”."
+    "refreshSeconds": 600,
+    "integration": "cli",
+    "capabilities": ["subscriptionWindows", "modelQuotas", "diagnostics"],
+    "reconnect": "Entre novamente executando “agy” no terminal (login com a conta Google)."
   },
   {
     "id": "grok",

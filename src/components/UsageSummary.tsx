@@ -13,6 +13,7 @@ import {
   hasRenewed,
   issueText,
   meter,
+  originText,
 } from "../usage/presentation";
 
 function Bar({ percent, tone }: { percent: number; tone: string }) {
@@ -143,6 +144,10 @@ export function UsageSummary({
         <p className="issue" role="alert">
           {issueText(usage.issue, usage.provider, now)}
         </p>
+      )}
+
+      {originText(usage.origin) && (
+        <p className="summary-origin">Fonte: {originText(usage.origin)}</p>
       )}
 
       <footer className="summary-footer" data-connection={state}>

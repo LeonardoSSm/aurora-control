@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 pub enum Provider {
     Codex,
     ClaudeCode,
-    Gemini,
+    Antigravity,
     Grok,
 }
 
@@ -17,7 +17,7 @@ impl Provider {
     pub const ALL: [Provider; 4] = [
         Provider::Codex,
         Provider::ClaudeCode,
-        Provider::Gemini,
+        Provider::Antigravity,
         Provider::Grok,
     ];
 }
@@ -26,12 +26,13 @@ impl Provider {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum BlockReason {
-    /// The provider's terms forbid third-party software from using the
-    /// client's sign-in to reach the service (Gemini CLI).
-    ProviderTerms,
     /// A source exists, but its terms of use could not be verified: the query
     /// stays off until they are (Grok).
     TermsUnverified,
+    /// The official CLI ran a model turn instead of answering a read-only
+    /// command: queries are suspended so the user's quota is never spent
+    /// (Antigravity).
+    CliSafety,
 }
 
 /// Primary metric. `stale` keeps the last valid percentage.
@@ -58,8 +59,12 @@ pub enum Source {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Origin {
-    /// Provider usage endpoint, queried by this app.
+    /// Provider usage endpoint, queried by this app (the same endpoint the
+    /// provider's own client uses).
     Api,
+    /// A read-only command of the provider's official CLI, run by this app in
+    /// the CLI's documented non-interactive mode.
+    Cli,
     /// Rate-limit record written by the provider's own client to its local session log.
     SessionLog,
     Fixture,

@@ -15,7 +15,7 @@ use tauri::Manager;
 fn main() {
     // One instance per Windows session, claimed before any worker starts. A
     // second launch exits without touching the providers.
-    let _instance = match instance::claim(instance::NAME) {
+    let _instance = match instance::claim(&instance::name()) {
         Ok(Some(instance)) => Some(instance),
         Ok(None) => return,
         Err(error) => {

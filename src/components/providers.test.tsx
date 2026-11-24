@@ -66,11 +66,11 @@ function rail(visible: readonly Provider[], shifts = collapsedShifts) {
 
 describe("provider catalog", () => {
   it("lists the four providers in order, shared with Rust", () => {
-    expect(providers).toEqual(["codex", "claudeCode", "gemini", "grok"]);
+    expect(providers).toEqual(["codex", "claudeCode", "antigravity", "grok"]);
     expect(providerNames).toEqual({
       codex: "Codex",
       claudeCode: "Claude Code",
-      gemini: "Gemini",
+      antigravity: "Antigravity",
       grok: "Grok",
     });
     expect(maxIndicators).toBe(catalog.length);
@@ -87,8 +87,10 @@ describe("provider catalog", () => {
     for (let slot = 1; slot <= maxIndicators; slot += 1) {
       expect(css).toContain(`.indicator:nth-of-type(${slot}) {`);
     }
-    // Gemini is a two-color gradient; Grok is monochrome silver.
-    expect(css).toMatch(/--gemini: #[0-9a-f]{6};\s+--gemini-2: #[0-9a-f]{6};/);
+    // Antigravity is a two-color gradient; Grok is monochrome silver.
+    expect(css).toMatch(
+      /--antigravity: #[0-9a-f]{6};\s+--antigravity-2: #[0-9a-f]{6};/,
+    );
     expect(css).toMatch(/--grok: #[0-9a-f]{6};\s+--grok-2: #[0-9a-f]{6};/);
   });
 });
@@ -146,11 +148,11 @@ describe("states of the new providers", () => {
   it("explains blocked sources and incompatible accounts honestly", () => {
     expect(
       issueText(
-        { code: "sourceBlocked", reason: "providerTerms" },
-        "gemini",
+        { code: "sourceBlocked", reason: "cliSafety" },
+        "antigravity",
         now,
       ),
-    ).toContain("termos do Gemini CLI");
+    ).toContain("rodada do modelo");
     expect(
       issueText(
         { code: "sourceBlocked", reason: "termsUnverified" },
@@ -158,8 +160,11 @@ describe("states of the new providers", () => {
         now,
       ),
     ).toContain("termos de uso da xAI");
-    expect(issueText({ code: "unsupported" }, "gemini", now)).toContain(
-      "não são cotas de assinatura",
+    expect(issueText({ code: "unsupported" }, "antigravity", now)).toContain(
+      "não tem cota de conta",
+    );
+    expect(issueText({ code: "authMissing" }, "antigravity", now)).toContain(
+      "agy",
     );
     expect(issueText({ code: "unsupported" }, "grok", now)).toContain(
       "não são cotas de assinatura",
@@ -171,12 +176,20 @@ describe("states of the new providers", () => {
 
   it("flags attention independently of the provider's colors", () => {
     const blocked: Usage = {
-      ...usage("gemini", 0),
+      ...usage("grok", 0),
       status: "unavailable",
       window: null,
-      issue: { code: "sourceBlocked", reason: "providerTerms" },
+      issue: { code: "sourceBlocked", reason: "termsUnverified" },
     };
     expect(attention(blocked)).toBe("blocked");
+    // A suspended CLI is a problem to look at, not a design choice.
+    expect(
+      attention({
+        ...blocked,
+        provider: "antigravity",
+        issue: { code: "sourceBlocked", reason: "cliSafety" },
+      }),
+    ).toBe("issue");
     const expired: Usage = {
       ...usage("grok", 40),
       status: "stale",
@@ -190,7 +203,7 @@ describe("states of the new providers", () => {
       <Rail
         state={{ status: "ready", snapshot: [blocked] }}
         side="left"
-        providers={["gemini"]}
+        providers={["grok"]}
         shifts={collapsedShifts}
         active={null}
         onPointer={vi.fn()}

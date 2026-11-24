@@ -50,6 +50,31 @@ pub fn claim(name: &str) -> io::Result<Option<Instance>> {
 
 pub const NAME: &str = "app.auroracontrol.desktop.instance";
 
+/// The mutex name for this process. Debug builds only: `AURORA_INSTANCE`
+/// adds a suffix, so a validation build can run beside the installed copy
+/// without stopping it. Release builds always use [`NAME`].
+pub fn name() -> String {
+    suffixed(
+        cfg!(debug_assertions)
+            .then(|| std::env::var("AURORA_INSTANCE").ok())
+            .flatten()
+            .as_deref(),
+    )
+}
+
+fn suffixed(suffix: Option<&str>) -> String {
+    match suffix.filter(|suffix| {
+        !suffix.is_empty()
+            && suffix.len() <= 32
+            && suffix
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '-')
+    }) {
+        Some(suffix) => format!("{NAME}-{suffix}"),
+        None => NAME.to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -62,5 +87,17 @@ mod tests {
         assert!(claim(&name).unwrap().is_none(), "second instance refused");
         drop(first);
         assert!(claim(&name).unwrap().is_some(), "free again after exit");
+    }
+
+    #[test]
+    fn only_a_short_plain_suffix_changes_the_name() {
+        assert_eq!(suffixed(None), NAME);
+        assert_eq!(
+            suffixed(Some("validation-1")),
+            format!("{NAME}-validation-1")
+        );
+        for bad in ["", "a/b", r"..\x", "with space", &"x".repeat(33)] {
+            assert_eq!(suffixed(Some(bad)), NAME, "{bad}");
+        }
     }
 }

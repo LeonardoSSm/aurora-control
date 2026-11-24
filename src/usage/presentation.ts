@@ -178,8 +178,8 @@ const missingText: Record<Provider, string> = {
   codex: "Nenhuma sessão do Codex encontrada. Entre com “codex login”.",
   claudeCode:
     "Nenhuma sessão do Claude Code encontrada. Execute “claude” no terminal.",
-  gemini:
-    "Nenhuma sessão do Gemini CLI encontrada. Execute “gemini” e escolha “Login with Google”.",
+  antigravity:
+    "Antigravity CLI não encontrado ou sem login. Instale-o e execute “agy” no terminal para entrar com a conta Google.",
   grok: "Nenhuma sessão do Grok Build encontrada. Entre com “grok login”.",
 };
 
@@ -187,7 +187,8 @@ const expiredText: Record<Provider, string> = {
   codex: "A sessão do Codex expirou. Abra o Codex para renová-la.",
   claudeCode:
     "A sessão do Claude Code expirou. Execute “claude” no terminal para renová-la.",
-  gemini: "A sessão do Gemini CLI expirou. Execute “gemini” para renová-la.",
+  antigravity:
+    "A sessão do Antigravity CLI expirou. Execute “agy” no terminal para renová-la.",
   grok: "A sessão do Grok Build expirou. Abra o Grok Build para renová-la.",
 };
 
@@ -196,8 +197,8 @@ const unavailableText: Record<Provider, string> = {
     "As credenciais do Codex estão no armazenamento do sistema, que o Aurora Control não lê.",
   claudeCode:
     "Credencial do Claude Code indisponível no arquivo local. O login pode estar no app Claude Desktop; execute “claude” no terminal para usar a sessão do CLI.",
-  gemini:
-    "O Gemini CLI guarda a credencial no cofre do sistema ou em arquivo cifrado, que o Aurora Control não lê.",
+  antigravity:
+    "O Antigravity CLI guarda a credencial no cofre do sistema; o Aurora Control não a lê e consulta as cotas só pelo próprio CLI.",
   grok: "Credencial do Grok Build indisponível no arquivo local.",
 };
 
@@ -205,17 +206,33 @@ const unsupportedText: Record<Provider, string> = {
   codex: "Login por chave de API: o Codex não expõe cotas de assinatura.",
   claudeCode:
     "Login por chave de API ou token restrito: cotas e custos não são expostos localmente.",
-  gemini:
-    "Login por chave da Gemini API ou Vertex AI: limites de API e de projeto não são cotas de assinatura.",
+  antigravity:
+    "Login por chave da Gemini API: a chave não tem cota de conta para exibir (o uso dela aparece no AI Studio).",
   grok: "Login por chave de API da xAI: limites de API pertencem à equipe e não são cotas de assinatura.",
 };
 
 const blockedText: Record<BlockReason, string> = {
-  providerTerms:
-    "Sessão detectada. Os termos do Gemini CLI proíbem que outro software use esse login para acessar o serviço, então o Aurora Control não consulta as cotas.",
   termsUnverified:
-    "Sessão detectada. A consulta de créditos fica desativada até a verificação dos termos de uso da xAI.",
+    "Sessão detectada. O Grok Build só mostra a franquia dentro do próprio CLI (/usage), e a consulta direta fica desativada até a verificação dos termos de uso da xAI.",
+  cliSafety:
+    "Consultas suspensas: o CLI executou uma rodada do modelo em vez de só informar a cota. Nada mais será executado até reiniciar o Aurora Control.",
 };
+
+/** Where the numbers came from, as the user should read it. */
+export function originText(origin: Usage["origin"]) {
+  switch (origin) {
+    case "api":
+      return "consulta à conta (mesmo endpoint do cliente oficial)";
+    case "cli":
+      return "CLI oficial, comando somente leitura";
+    case "sessionLog":
+      return "registro local do cliente";
+    case "fixture":
+      return "dados de demonstração";
+    case null:
+      return null;
+  }
+}
 
 /** What went wrong, in terms of what the user can do about it. */
 export function issueText(issue: Issue, provider: Provider, now: Date) {

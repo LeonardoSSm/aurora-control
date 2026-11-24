@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { Capability, Integration } from "../usage/catalog";
 import { providers } from "../usage/catalog";
-import type { Issue, Provider } from "../usage/model";
+import type { Issue, Origin, Provider } from "../usage/model";
 import type { Side } from "./railGeometry";
 
 // Mirrors src-tauri/src/preferences.rs, settings.rs and usage/model.rs.
@@ -81,6 +81,7 @@ export interface ProviderView {
   capabilities: Capability[];
   reconnect: string;
   status: "available" | "stale" | "unavailable";
+  origin: Origin | null;
   issue: Issue | null;
   account: string | null;
   plan: string | null;

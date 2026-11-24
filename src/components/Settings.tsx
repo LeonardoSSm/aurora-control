@@ -20,7 +20,12 @@ import type {
   SettingsView,
   StartupStatus,
 } from "../desktop/settings";
-import { formatAgo, formatMoment, issueText } from "../usage/presentation";
+import {
+  formatAgo,
+  formatMoment,
+  issueText,
+  originText,
+} from "../usage/presentation";
 
 const loadNotes: Partial<Record<LoadStatus, string>> = {
   migrated:
@@ -42,8 +47,8 @@ const startupNotes: Record<StartupStatus, string> = {
 };
 
 const integrationNotes: Record<ProviderView["integration"], string> = {
-  live: "Cotas reais da conta",
-  authOnly: "Somente sessão local · sem fonte de cotas autorizada",
+  live: "Cotas reais da conta (mesmo endpoint do cliente oficial)",
+  cli: "Cotas reais pelo CLI oficial (comando somente leitura)",
   gated:
     "Somente sessão local · consulta desativada até a verificação dos termos",
 };
@@ -205,6 +210,12 @@ function ProviderCard({
           {provider.issue && (
             <p className="provider-issue">
               {issueText(provider.issue, provider.id, now)}
+            </p>
+          )}
+          {provider.origin && (
+            <p className="provider-line">
+              {" "}
+              Fonte: {originText(provider.origin)}{" "}
             </p>
           )}
           <p className="provider-line provider-times">

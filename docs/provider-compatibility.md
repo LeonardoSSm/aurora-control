@@ -1,17 +1,31 @@
 # Compatibilidade dos provedores
 
-Situação na versão 0.3.0, em 24/11/2026. O catálogo dos provedores fica em [`src/usage/catalog.json`](../src/usage/catalog.json), compartilhado por Rust e TypeScript.
+Situação na versão 0.3.1, em 24/11/2026. O catálogo dos provedores fica em [`src/usage/catalog.json`](../src/usage/catalog.json), compartilhado por Rust e TypeScript. A investigação do Ciclo 03.1 está em [`docs/cycle-03-1/`](cycle-03-1/implementation-report.md).
 
 ## Resumo
 
-| Provedor    | Adaptador | Autenticação detectada              | Consulta real validada                  | Cotas de assinatura                       | Métricas parciais | Situação                                          |
-| ----------- | --------- | ----------------------------------- | --------------------------------------- | ----------------------------------------- | ----------------- | ------------------------------------------------- |
-| Codex       | Sim       | Sim (`~/.codex/auth.json`)          | **Sim**, nesta máquina em 24/11/2026    | Sim: janela de 5 h, semanal e créditos    | Registro local    | Integrado                                         |
-| Claude Code | Sim       | Sim (`~/.claude/.credentials.json`) | **Sim**, nesta máquina em 24/11/2026    | Sim: 5 h, semanal, por modelo e uso extra | Tokens locais     | Integrado                                         |
-| Gemini      | Sim       | Sim, só por arquivos locais         | Não aplicável: nenhuma consulta é feita | **Não**: a fonte existe, mas é proibida   | Não               | **Bloqueado pelos termos do provedor**            |
-| Grok        | Sim       | Sim (`~/.grok/auth.json`)           | **Não**: consulta desligada             | Fonte identificada, parser testado        | Não               | **Bloqueado até a verificação dos termos da xAI** |
+| Provedor    | Classificação da fonte                | Autenticação detectada              | Consulta real validada                   | Cotas acessíveis                                        | Situação                                                    |
+| ----------- | ------------------------------------- | ----------------------------------- | ---------------------------------------- | ------------------------------------------------------- | ----------------------------------------------------------- |
+| Codex       | Endpoint do cliente oficial (interno) | Sim (`~/.codex/auth.json`)          | **Sim**, 24/11/2026                      | 5 h, semanal, créditos; registro local como fallback    | Integrado                                                   |
+| Claude Code | Endpoint do cliente oficial (interno) | Sim (`~/.claude/.credentials.json`) | **Sim**, 24/11/2026                      | 5 h, semanal, por modelo, uso extra; tokens locais      | Integrado                                                   |
+| Antigravity | **CLI oficial** (`agy -p /usage`)     | Pelo próprio CLI (`agy.exe`)        | **Sim**, 24/11/2026, conferida com o CLI | 5 h e semanal por grupo (Gemini; Claude e GPT)          | Integrado, sem identidade de conta (sem alertas de consumo) |
+| Grok        | **Fonte bloqueada**                   | Sim (`~/.grok/auth.json`)           | **Não**: consulta desligada              | Franquia semanal ou mensal identificada, parser testado | Bloqueado até a verificação dos termos da xAI               |
 
 "Consulta real validada" significa que o app leu dados reais de uma conta autenticada, não apenas fixtures. Os testes automatizados usam só fixtures sintéticas.
+
+O indicador "Gemini" da 0.3.0 foi substituído pelo Antigravity na 0.3.1: o Google encerrou o login do Gemini CLI para Gemini Code Assist for individuals. A seção do Gemini abaixo fica como registro da investigação.
+
+## Antigravity (Google)
+
+- **Modalidades suportadas:** conta Google autenticada no Antigravity CLI (`agy`), planos individuais (gratuito, Google AI Plus, Pro, Ultra). Login por chave da Gemini API é conta incompatível (o CLI sai com código 2). Contas Enterprise e Business não têm cotas por modelo.
+- **Fonte de autenticação:** a do próprio CLI (cofre do sistema). O app não lê nem copia a credencial.
+- **Fonte das métricas:** `%LOCALAPPDATA%\agy\bin\agy.exe -p /usage --output-format json`, modo documentado para scripts, que responde sem rodada do agente e sem gastar cota. Cada bucket vira uma cota: `agy-gemini-5h`, `agy-gemini-weekly`, `agy-3p-5h` e `agy-3p-weekly`.
+- **Limitações:** a resposta não identifica a conta (sem alertas de consumo e renovação); cerca de 4 s por consulta; cadência de 10 min; cada execução deixa um log de falha vazio na pasta do CLI; não verificado se a IDE e o CLI compartilham o mesmo pool.
+- **Interfaces internas:** nenhuma usada pelo app; quem consulta o serviço é o CLI oficial.
+- **Proteções:** executável e argumentos fixos, timeout, limite de saída, cancelamento ao desativar, execução única e disjuntor que suspende a fonte se o CLI executar uma rodada do modelo.
+- **Termos:** ver [Revisão de termos](cycle-03-1/provider-terms-review.md#google-antigravity) (seção 6 dos termos adicionais e a interpretação adotada).
+- **Validação real:** 24/11/2026: percentuais, janelas e renovações idênticos à saída do `agy`.
+- **Reconexão:** executar `agy` no terminal e entrar com a conta Google.
 
 ## Codex (OpenAI)
 
@@ -35,7 +49,7 @@ Situação na versão 0.3.0, em 24/11/2026. O catálogo dos provedores fica em [
 - **Validação real:** 24/11/2026, conta Pro, leitura `api` com janelas de 5 h e semanal. A autenticação tinha sido renovada pelo proprietário via CLI.
 - **Reconexão:** autenticar novamente pelo Claude Code CLI.
 
-## Gemini (Google)
+## Gemini (Google) — 0.3.0, substituído pelo Antigravity
 
 ### O que foi investigado
 

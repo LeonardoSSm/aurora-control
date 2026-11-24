@@ -407,10 +407,11 @@ impl Tracker {
         match (self.session, good.identity) {
             (Session::SignedOut, _) => false,
             (session, Some(owner)) => session.identity() == Some(owner),
-            // Without an identity, a live reading is only trusted as the
-            // result of the latest attempt. Local logs and fixtures are shown
-            // as unattributed history.
-            (_, None) => good.origin != Origin::Api || self.latest,
+            // Without an identity, a live reading (provider API or official
+            // CLI) is only trusted as the result of the latest attempt: after
+            // a failure it may belong to an account the user has left. Local
+            // logs and fixtures are shown as unattributed history.
+            (_, None) => !matches!(good.origin, Origin::Api | Origin::Cli) || self.latest,
         }
     }
 
@@ -1337,7 +1338,7 @@ mod tests {
                 session: account("A"),
                 account: Some("a•••@example.com".into()),
                 ..Outcome::failed(FetchError::SourceBlocked(
-                    crate::usage::model::BlockReason::ProviderTerms,
+                    crate::usage::model::BlockReason::TermsUnverified,
                 ))
             },
             at(0),
@@ -1347,7 +1348,7 @@ mod tests {
         assert_eq!(
             usage.issue,
             Some(Issue::SourceBlocked {
-                reason: crate::usage::model::BlockReason::ProviderTerms
+                reason: crate::usage::model::BlockReason::TermsUnverified
             })
         );
         assert_eq!(usage.account.as_deref(), Some("a•••@example.com"));
@@ -1397,5 +1398,55 @@ mod tests {
         let view = renewing.automatic_usage(at(120));
         assert_eq!(view.reading, Reading::Available { percent_used: 73 });
         assert_eq!(view.window.unwrap().id, "sevenDay");
+    }
+
+    #[test]
+    fn an_unverified_cli_reading_is_hidden_after_a_failed_attempt() {
+        let mut tracker = Tracker::new(
+            Provider::Antigravity,
+            Source::Live,
+            Policy::default(),
+            at(0),
+        );
+        let reading = Fetched {
+            identity: None,
+            account: None,
+            plan: None,
+            origin: Origin::Cli,
+            quotas: vec![Quota::window(
+                "agy-gemini-5h",
+                "Gemini · 5 h",
+                69,
+                Some(300),
+                None,
+            )],
+            observed_at: t0(),
+        };
+        tracker.begin(at(0));
+        tracker.finish(
+            Outcome {
+                session: Session::Unverified,
+                result: Some(Ok(reading)),
+                ..Outcome::default()
+            },
+            at(1),
+        );
+        assert_eq!(
+            tracker.usage(at(2)).reading,
+            Reading::Available { percent_used: 69 }
+        );
+        // The next attempt fails: the reading may belong to an account the
+        // user has left in the CLI, so it is no longer shown.
+        tracker.begin(at(400));
+        tracker.finish(
+            Outcome {
+                session: Session::Unverified,
+                ..Outcome::failed(FetchError::Timeout)
+            },
+            at(401),
+        );
+        let usage = tracker.usage(at(402));
+        assert_eq!(usage.reading, Reading::Unavailable);
+        assert_eq!(usage.origin, None);
     }
 }

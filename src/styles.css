@@ -20,9 +20,9 @@
   /* Provider identity. */
   --codex: #7fdcc0;
   --claude: #e39a76;
-  /* Gemini: blue into violet, a discreet gradient along the arc. */
-  --gemini: #6fa8ff;
-  --gemini-2: #a682ff;
+  /* Antigravity: blue into violet, a discreet gradient along the arc. */
+  --antigravity: #6fa8ff;
+  --antigravity-2: #a682ff;
   /* Grok: monochrome. Bright silver on dark surfaces, never the grey of an
      unavailable ring (which draws no arc at all). */
   --grok: #eef0f4;
@@ -49,9 +49,9 @@ body {
 [data-provider="claudeCode"] {
   --accent: var(--claude);
 }
-[data-provider="gemini"] {
-  --accent: var(--gemini);
-  --accent-2: var(--gemini-2);
+[data-provider="antigravity"] {
+  --accent: var(--antigravity);
+  --accent-2: var(--antigravity-2);
 }
 [data-provider="grok"] {
   --accent: var(--grok);
@@ -465,8 +465,8 @@ body.settings-body {
     180deg,
     var(--codex),
     var(--claude) 38%,
-    var(--gemini) 66%,
-    var(--gemini-2) 82%,
+    var(--antigravity) 66%,
+    var(--antigravity-2) 82%,
     var(--grok)
   );
   box-shadow:
