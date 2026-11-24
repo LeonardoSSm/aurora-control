@@ -181,6 +181,12 @@ impl Service {
     pub fn set_visible(&self, visible: &[Provider]) {
         for slot in &self.slots {
             let show = visible.contains(&slot.adapter.provider());
+            if show {
+                // Cleared before the slot reads as enabled, so a worker that
+                // wakes now never sees a stale cancellation. A no-op when the
+                // provider was already enabled.
+                slot.adapter.resume();
+            }
             let was = slot.enabled.swap(show, Ordering::SeqCst);
             if was && !show {
                 slot.adapter.cancel();

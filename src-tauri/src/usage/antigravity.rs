@@ -156,6 +156,9 @@ impl Runner for Agy {
             // CREATE_NO_WINDOW: no console flashes on the user's screen.
             command.creation_flags(0x0800_0000);
         }
+        if cancel.load(Ordering::SeqCst) {
+            return Err(RunError::Cancelled);
+        }
         let mut child = command.spawn().map_err(|_| RunError::Spawn)?;
         let stdout = child.stdout.take().ok_or(RunError::Spawn)?;
         let stderr = child.stderr.take().ok_or(RunError::Spawn)?;
@@ -369,6 +372,10 @@ impl<R: Runner> Antigravity<R> {
             // Another run is in progress: never two CLIs at once.
             return Err(FetchError::Timeout);
         };
+        // Disabled meanwhile: nothing is started.
+        if self.cancel.load(Ordering::SeqCst) {
+            return Err(FetchError::Timeout);
+        }
         let output = match self.runner.run(&self.cancel) {
             Ok(output) => output,
             Err(RunError::Missing) => return Err(FetchError::AuthMissing),
@@ -424,8 +431,10 @@ impl<R: Runner> UsageAdapter for Antigravity<R> {
         })
     }
 
+    /// Never clears the cancel flag: a provider disabled between the worker's
+    /// check and this call must not start the CLI. Only `resume`, called
+    /// when the provider is enabled again, clears it.
     fn fetch(&self, now: DateTime<Utc>) -> Outcome {
-        self.cancel.store(false, Ordering::SeqCst);
         if !self.runner.installed() {
             return Outcome::signed_out(FetchError::AuthMissing);
         }
@@ -438,6 +447,10 @@ impl<R: Runner> UsageAdapter for Antigravity<R> {
 
     fn cancel(&self) {
         self.cancel.store(true, Ordering::SeqCst);
+    }
+
+    fn resume(&self) {
+        self.cancel.store(false, Ordering::SeqCst);
     }
 
     fn diagnostics(&self, _now: DateTime<Utc>) -> Option<Vec<DiagnosticRow>> {
@@ -748,6 +761,26 @@ mod tests {
         adapter.cancel();
         let outcome = worker.join().unwrap();
         assert_eq!(result(&outcome), &Err(FetchError::Timeout));
+    }
+
+    #[test]
+    fn a_cancel_before_fetch_is_kept_until_the_provider_is_enabled_again() {
+        let adapter = Antigravity::new(Script::new(vec![Script::ok(REAL)]));
+        // Disabled after the worker's check, before it called fetch.
+        adapter.cancel();
+        assert_eq!(result(&adapter.fetch(now())), &Err(FetchError::Timeout));
+        assert_eq!(
+            *adapter.runner.runs.lock().unwrap(),
+            0,
+            "the CLI never started"
+        );
+        // A second fetch while still disabled: still nothing.
+        adapter.fetch(now());
+        assert_eq!(*adapter.runner.runs.lock().unwrap(), 0);
+        // Enabled again: the next fetch runs.
+        adapter.resume();
+        assert!(result(&adapter.fetch(now())).is_ok());
+        assert_eq!(*adapter.runner.runs.lock().unwrap(), 1);
     }
 
     /// Runs the real `agy.exe` through the production runner. Opt-in only:
