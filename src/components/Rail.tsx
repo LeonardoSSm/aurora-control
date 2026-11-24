@@ -1,5 +1,4 @@
 import type { RailShifts, Side } from "../desktop/railGeometry";
-import { providers } from "../usage/model";
 import type { Provider } from "../usage/model";
 import { railStatus } from "../usage/presentation";
 import type { RailState } from "../usage/presentation";
@@ -8,6 +7,7 @@ import { UsageRing } from "./UsageRing";
 export function Rail({
   state,
   side,
+  providers,
   shifts,
   active,
   onPointer,
@@ -15,6 +15,8 @@ export function Rail({
 }: {
   state: RailState;
   side: Side;
+  /** Visible indicators, from the top: one slot each. */
+  providers: readonly Provider[];
   shifts: RailShifts;
   active: Provider | null;
   onPointer: (provider: Provider | null) => void;

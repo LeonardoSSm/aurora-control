@@ -1,0 +1,10 @@
+{
+  "identifier": "settings",
+  "description": "A janela de configurações lê e grava preferências validadas e consulta o diagnóstico de autenticação. Não recebe eventos nem comandos das sobreposições.",
+  "windows": ["settings"],
+  "permissions": [
+    "allow-get-settings",
+    "allow-set-preferences",
+    "allow-get-claude-diagnostics"
+  ]
+}

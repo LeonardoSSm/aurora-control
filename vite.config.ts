@@ -14,6 +14,7 @@ export default defineConfig({
       input: {
         rail: fileURLToPath(new URL("./index.html", import.meta.url)),
         summary: fileURLToPath(new URL("./summary.html", import.meta.url)),
+        settings: fileURLToPath(new URL("./settings.html", import.meta.url)),
       },
     },
   },

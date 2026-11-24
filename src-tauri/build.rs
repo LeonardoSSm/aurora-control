@@ -8,6 +8,9 @@ fn main() {
             "rail_pointer",
             "summary_ready",
             "show_summary",
+            "get_settings",
+            "set_preferences",
+            "get_claude_diagnostics",
         ]),
     ))
     .expect("failed to generate Tauri configuration and permissions");

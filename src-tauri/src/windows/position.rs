@@ -1,6 +1,6 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Side {
     Left,
@@ -17,6 +17,7 @@ pub const SLIDE: u8 = (INDICATOR_RADIUS + EXPANDED_INSET) as u8;
 pub const INDICATOR_GAP: i32 = 14;
 pub const INDICATOR_STEP: i32 = INDICATOR_DIAMETER + INDICATOR_GAP;
 pub const RAIL_WIDTH: i32 = SLIDE as i32 + INDICATOR_RADIUS + 2;
+#[cfg(test)]
 pub const RAIL_HEIGHT: i32 = INDICATOR_STEP + INDICATOR_DIAMETER;
 /// The Win32 region extends past the drawn circle, so its aliased edge falls on
 /// transparent pixels and the visible edge stays anti-aliased.
@@ -56,6 +57,8 @@ pub struct Layout {
     pub summary: Rect,
     side: Side,
     scale: f64,
+    /// Visible indicators, from the top (1 or 2).
+    slots: usize,
 }
 
 pub fn anchor(index: usize) -> i32 {
@@ -73,8 +76,14 @@ impl Layout {
                 Side::Right => RAIL_WIDTH - shift,
             };
             let top = index as i32 * INDICATOR_STEP;
-            let left = pixels(center_x - INDICATOR_RADIUS - REGION_PAD, self.scale);
-            let right = pixels(center_x + INDICATOR_RADIUS + REGION_PAD, self.scale);
+            // The rail may be narrower than its logical width on a tiny work area:
+            // the right side then anchors on the real window edge (audit I07).
+            let narrowing = match self.side {
+                Side::Left => 0,
+                Side::Right => self.rail.width - pixels(RAIL_WIDTH, self.scale),
+            };
+            let left = narrowing + pixels(center_x - INDICATOR_RADIUS - REGION_PAD, self.scale);
+            let right = narrowing + pixels(center_x + INDICATOR_RADIUS + REGION_PAD, self.scale);
             let upper = pixels(top - REGION_PAD, self.scale);
             let lower = pixels(top + INDICATOR_DIAMETER + REGION_PAD, self.scale);
             Rect {
@@ -86,36 +95,89 @@ impl Layout {
         })
     }
 
-    /// Screen area that keeps a hovered indicator open: the expanded circle,
-    /// the summary card and the gap between them.
-    pub fn hover_zone(&self, index: usize, summary: Option<Rect>) -> Zone {
-        let mut shifts = [0; 2];
-        shifts[index] = SLIDE;
+    /// The circles of the visible indicators, for the window region.
+    pub fn visible_circles(&self, shifts: [u8; 2]) -> Vec<Rect> {
+        self.indicator_circles(shifts)
+            .into_iter()
+            .take(self.slots)
+            .collect()
+    }
+
+    /// The input shape of one indicator on screen, for the slide offsets of
+    /// the last frame Windows accepted: the same ellipse as the window region,
+    /// clipped to the rail window. Transparent corners are outside (audit I04).
+    pub fn indicator_shape(&self, index: usize, shifts: [u8; 2]) -> Shape {
         let circle = self.indicator_circles(shifts)[index];
-        let circle = Rect {
-            x: self.rail.x + circle.x,
-            y: self.rail.y + circle.y,
-            ..circle
-        };
-        let mut rects = vec![circle];
-        if let Some(summary) = summary.filter(|summary| summary.width > 0) {
-            // The bridge spans the gap at the height of the circle.
-            rects.push(Rect {
-                y: circle.y,
-                height: circle.height,
-                ..circle.union(&summary)
-            });
-            rects.push(summary);
+        Shape::Ellipse {
+            bounds: Rect {
+                x: self.rail.x + circle.x,
+                y: self.rail.y + circle.y,
+                ..circle
+            },
+            clip: self.rail,
         }
-        Zone(rects)
+    }
+
+    /// Screen area that keeps a hovered indicator open: the indicator as
+    /// drawn in the accepted frame, the summary card and the bridge between
+    /// them at the height of the circle.
+    pub fn hover_zone(&self, index: usize, shifts: [u8; 2], summary: Option<Rect>) -> Zone {
+        let circle = self.indicator_shape(index, shifts);
+        let mut shapes = vec![circle];
+        if let (Some(summary), Shape::Ellipse { bounds, .. }) =
+            (summary.filter(|summary| summary.width > 0), circle)
+        {
+            // The bridge spans from the circle center to the card.
+            let center = Rect {
+                x: bounds.x + bounds.width / 2,
+                width: 1,
+                ..bounds
+            };
+            shapes.push(Shape::Rect(Rect {
+                y: bounds.y,
+                height: bounds.height,
+                ..center.union(&summary)
+            }));
+            shapes.push(Shape::Rect(summary));
+        }
+        Zone(shapes)
     }
 }
 
-pub struct Zone(Vec<Rect>);
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Shape {
+    Rect(Rect),
+    /// The ellipse inscribed in `bounds`, intersected with `clip`.
+    Ellipse {
+        bounds: Rect,
+        clip: Rect,
+    },
+}
+
+impl Shape {
+    pub fn contains(&self, x: i32, y: i32) -> bool {
+        match *self {
+            Shape::Rect(rect) => rect.contains(x, y),
+            Shape::Ellipse { bounds, clip } => {
+                if !clip.contains(x, y) || !bounds.contains(x, y) {
+                    return false;
+                }
+                // Pixel centers against the normalized ellipse equation.
+                let rx = f64::from(bounds.width) / 2.0;
+                let ry = f64::from(bounds.height) / 2.0;
+                let dx = (f64::from(x - bounds.x) + 0.5 - rx) / rx;
+                let dy = (f64::from(y - bounds.y) + 0.5 - ry) / ry;
+                dx * dx + dy * dy <= 1.0
+            }
+        }
+    }
+}
+
+pub struct Zone(Vec<Shape>);
 
 impl Zone {
     pub fn contains(&self, x: i32, y: i32) -> bool {
-        self.0.iter().any(|rect| rect.contains(x, y))
+        self.0.iter().any(|shape| shape.contains(x, y))
     }
 }
 
@@ -125,9 +187,28 @@ fn pixels(logical: i32, scale: f64) -> i32 {
 
 // All returned coordinates and dimensions are physical pixels. `anchor` and
 // `summary_height` are logical.
+/// Height of the rail for `slots` visible indicators, in logical pixels.
+pub fn rail_height(slots: usize) -> i32 {
+    slots.clamp(1, 2) as i32 * INDICATOR_STEP - INDICATOR_GAP
+}
+
+/// [`layout_with`] for both indicators.
+#[cfg(test)]
 pub fn layout(work: Rect, scale: f64, side: Side, anchor: i32, summary_height: i32) -> Layout {
+    layout_with(work, scale, side, 2, anchor, summary_height)
+}
+
+pub fn layout_with(
+    work: Rect,
+    scale: f64,
+    side: Side,
+    slots: usize,
+    anchor: i32,
+    summary_height: i32,
+) -> Layout {
+    let slots = slots.clamp(1, 2);
     let rail_width = pixels(RAIL_WIDTH, scale).min(work.width);
-    let rail_height = pixels(RAIL_HEIGHT, scale).min(work.height);
+    let rail_height = pixels(rail_height(slots), scale).min(work.height);
     let right = work.x + work.width;
     let rail = Rect {
         x: match side {
@@ -166,6 +247,7 @@ pub fn layout(work: Rect, scale: f64, side: Side, anchor: i32, summary_height: i
         summary,
         side,
         scale,
+        slots,
     }
 }
 
@@ -326,7 +408,8 @@ mod tests {
     #[test]
     fn hover_zone_bridges_the_circle_and_the_summary() {
         let result = layout(WORK, 1.0, Side::Right, anchor(0), 180);
-        let zone = result.hover_zone(0, Some(result.summary));
+        let expanded = [SLIDE, 0];
+        let zone = result.hover_zone(0, expanded, Some(result.summary));
         // Gap between the summary's right edge and the expanded circle.
         assert!(zone.contains(1855, result.rail.y + 26));
         assert!(zone.contains(1600, 400));
@@ -334,8 +417,90 @@ mod tests {
         assert!(!zone.contains(1855, 380));
         // The neighbor indicator is not part of the zone.
         assert!(!zone.contains(1900, result.rail.y + INDICATOR_STEP + 26));
-        let alone = result.hover_zone(1, None);
+        let alone = result.hover_zone(1, [0, 0], None);
         assert!(alone.contains(1900, result.rail.y + INDICATOR_STEP + 26));
         assert!(!alone.contains(1900, result.rail.y + 26));
+    }
+
+    #[test]
+    fn i04_transparent_corners_and_the_unreached_final_frame_are_outside() {
+        for scale in [1.0, 1.25, 1.5] {
+            for side in [Side::Right, Side::Left] {
+                let result = layout(WORK, scale, side, anchor(0), 180);
+                let rail = result.rail;
+                // Expanded circle: its bounding box corner is not the circle.
+                let shape = result.indicator_shape(0, [SLIDE, 0]);
+                let Shape::Ellipse { bounds, .. } = shape else {
+                    unreachable!()
+                };
+                let center = (bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+                assert!(shape.contains(center.0, center.1), "{scale} {side:?}");
+                assert!(!shape.contains(bounds.x, bounds.y), "{scale} {side:?}");
+                assert!(
+                    !shape.contains(bounds.x + bounds.width - 1, bounds.y + bounds.height - 1),
+                    "{scale} {side:?}"
+                );
+                // Mid-animation (or collapsed), the zone follows the accepted
+                // frame, not the final expanded position.
+                let collapsed = result.hover_zone(0, [0, 0], None);
+                let expanded_center = center;
+                assert!(
+                    !collapsed.contains(expanded_center.0, expanded_center.1),
+                    "{scale} {side:?}"
+                );
+                // The collapsed half circle is clipped by the window.
+                let edge_y = rail.y + pixels(INDICATOR_RADIUS, scale);
+                let outside_x = match side {
+                    Side::Right => rail.x + rail.width,
+                    Side::Left => rail.x - 1,
+                };
+                assert!(!collapsed.contains(outside_x, edge_y), "{scale} {side:?}");
+                let inside_x = match side {
+                    Side::Right => rail.x + rail.width - 2,
+                    Side::Left => rail.x + 1,
+                };
+                assert!(collapsed.contains(inside_x, edge_y), "{scale} {side:?}");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod slot_tests {
+    use super::*;
+
+    const WORK: Rect = Rect {
+        x: 0,
+        y: 0,
+        width: 1920,
+        height: 1040,
+    };
+
+    #[test]
+    fn a_single_visible_provider_gets_a_single_circle_rail() {
+        assert_eq!(rail_height(2), RAIL_HEIGHT);
+        assert_eq!(rail_height(1), INDICATOR_DIAMETER);
+        let one = layout_with(WORK, 1.25, Side::Right, 1, anchor(0), 180);
+        assert_eq!(one.rail.height, 65);
+        assert_eq!(one.visible_circles([0, 0]).len(), 1);
+        assert_eq!(
+            layout_with(WORK, 1.0, Side::Left, 2, 0, 0)
+                .visible_circles([0, 0])
+                .len(),
+            2
+        );
+        // Out-of-range counts are clamped.
+        assert_eq!(layout_with(WORK, 1.0, Side::Left, 0, 0, 0).rail.height, 52);
+        assert_eq!(layout_with(WORK, 1.0, Side::Left, 9, 0, 0).rail.height, 118);
+    }
+
+    #[test]
+    fn i07_a_narrow_work_area_keeps_the_right_circle_on_the_window_edge() {
+        let narrow = Rect { width: 40, ..WORK };
+        let result = layout_with(narrow, 1.0, Side::Right, 2, 0, 0);
+        assert_eq!(result.rail.width, 40);
+        let circle = result.indicator_circles([0, 0])[0];
+        // Collapsed: the circle center sits on the window's right edge.
+        assert_eq!(circle.x + circle.width / 2, result.rail.width);
     }
 }

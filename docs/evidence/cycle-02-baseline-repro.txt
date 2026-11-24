@@ -1,0 +1,28 @@
+test usage::scheduler::baseline_repro::b02_huge_retry_after_panics_in_finish ... FAILED
+test usage::scheduler::baseline_repro::b01_logout_keeps_previous_account_quota ... FAILED
+test usage::scheduler::baseline_repro::b01_account_switch_with_network_error_keeps_previous_account ... FAILED
+test usage::scheduler::baseline_repro::i01_503_retry_after_is_dropped_and_retry_is_60s ... FAILED
+test usage::scheduler::baseline_repro::i01_manual_click_bypasses_auth_rejected_recovery ... FAILED
+test usage::scheduler::baseline_repro::i02_renewed_window_is_presented_as_fresh_zero ... FAILED
+test usage::scheduler::baseline_repro::b02_rollout_resets_in_seconds_out_of_range_panics ... FAILED
+test usage::scheduler::baseline_repro::b02_codex_reset_after_out_of_range_panics ... FAILED
+thread 'usage::scheduler::baseline_repro::b02_huge_retry_after_panics_in_finish' (180) panicked at src\usage\scheduler.rs:158:48:
+thread 'usage::scheduler::baseline_repro::b01_logout_keeps_previous_account_quota' (26148) panicked at src\usage\scheduler.rs:466:9:
+assertion `left == right` failed: after logout: Stale { percent_used: 91 } Some("conta-A")
+  left: (Stale { percent_used: 91 }, Some("conta-A"))
+ right: (Unavailable, None)
+thread 'usage::scheduler::baseline_repro::b01_account_switch_with_network_error_keeps_previous_account' (21940) panicked at src\usage\scheduler.rs:473:9:
+assertion `left == right` failed: reading Stale { percent_used: 91 }
+  left: Some("conta-A")
+ right: Some("conta-B")
+thread 'usage::scheduler::baseline_repro::i01_503_retry_after_is_dropped_and_retry_is_60s' (24396) panicked at src\usage\scheduler.rs:491:9:
+next automatic attempt after 60 s
+thread 'usage::scheduler::baseline_repro::i01_manual_click_bypasses_auth_rejected_recovery' (3084) panicked at src\usage\scheduler.rs:496:9:
+manual accepted 20 s after 401 while automatic waits 300 s
+thread 'usage::scheduler::baseline_repro::i02_renewed_window_is_presented_as_fresh_zero' (24952) panicked at src\usage\scheduler.rs:502:9:
+assertion `left != right` failed: updatedAt Some("2026-11-23T18:00:00Z")
+  left: Available { percent_used: 0 }
+ right: Available { percent_used: 0 }
+thread 'usage::scheduler::baseline_repro::b02_rollout_resets_in_seconds_out_of_range_panics' (25204) panicked at %USERPROFILE%\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\chrono-0.4.45\src\lib.rs:717:17:
+thread 'usage::scheduler::baseline_repro::b02_codex_reset_after_out_of_range_panics' (23700) panicked at %USERPROFILE%\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\chrono-0.4.45\src\lib.rs:717:17:
+test result: FAILED. 0 passed; 8 failed; 0 ignored; 0 measured; 47 filtered out; finished in 0.00s

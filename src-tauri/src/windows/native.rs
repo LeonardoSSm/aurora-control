@@ -83,24 +83,29 @@ impl Drop for Region {
 pub(super) fn set_indicator_regions(
     window: &WebviewWindow,
     rect: Rect,
-    circles: [Rect; 2],
+    circles: &[Rect],
 ) -> tauri::Result<()> {
     let handle = hwnd(window)?;
+    let failed = || io::Error::other("Could not apply the rail window region").into();
     // SAFETY: Tauri owns the live HWND. GDI regions are owned by their wrappers
     // until the result is transferred to Windows by SetWindowRgn.
     unsafe {
         let ellipse =
             |r: Rect| Region::new(CreateEllipticRgn(r.x, r.y, r.x + r.width, r.y + r.height));
-        let first = ellipse(circles[0])?;
-        let second = ellipse(circles[1])?;
-        let area = Region::new(CreateRectRgn(0, 0, rect.width, rect.height))?;
-        if CombineRgn(first.0, first.0, second.0, RGN_OR) == 0
-            || CombineRgn(first.0, first.0, area.0, RGN_AND) == 0
-            || SetWindowRgn(handle, first.0, IsWindowVisible(handle)) == 0
-        {
-            return Err(io::Error::other("Could not apply the rail window region").into());
+        let combined = Region::new(CreateRectRgn(0, 0, 0, 0))?;
+        for circle in circles {
+            let circle = ellipse(*circle)?;
+            if CombineRgn(combined.0, combined.0, circle.0, RGN_OR) == 0 {
+                return Err(failed());
+            }
         }
-        std::mem::forget(first);
+        let area = Region::new(CreateRectRgn(0, 0, rect.width, rect.height))?;
+        if CombineRgn(combined.0, combined.0, area.0, RGN_AND) == 0
+            || SetWindowRgn(handle, combined.0, IsWindowVisible(handle)) == 0
+        {
+            return Err(failed());
+        }
+        std::mem::forget(combined);
     }
     Ok(())
 }
