@@ -46,7 +46,7 @@ try {
     $bitmap = New-Object System.Drawing.Bitmap $Width, $Height
     $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
     $graphics.CopyFromScreen($screen.Right - $Width, $screen.Bottom - $Height, 0, 0, $bitmap.Size)
-    $bitmap.Save((Join-Path (Get-Location) $Out), [System.Drawing.Imaging.ImageFormat]::Png)
+    $bitmap.Save([System.IO.Path]::GetFullPath($Out, (Get-Location).Path), [System.Drawing.Imaging.ImageFormat]::Png)
     $graphics.Dispose(); $bitmap.Dispose()
     Write-Output "captured $Out"
 } finally {
