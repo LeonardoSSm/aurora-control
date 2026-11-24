@@ -10,7 +10,8 @@ fn main() {
             "show_summary",
             "get_settings",
             "set_preferences",
-            "get_claude_diagnostics",
+            "get_diagnostics",
+            "send_test_notification",
         ]),
     ))
     .expect("failed to generate Tauri configuration and permissions");
