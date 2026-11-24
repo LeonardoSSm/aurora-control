@@ -1,0 +1,21 @@
+# cycle-03-1-validate-overlay-left.txt · build eca2a91 + working tree · 2026-11-24 06:02 -03:00 · Windows 10.0.26300.0 · beside a running installed copy (AURORA_INSTANCE)
+PASS  rail visible  hwnd 264572
+PASS  summary hidden at start  
+PASS  rail geometry  (0,457) 60x118
+PASS  no-activate tool window  0x8000198
+PASS  cursor moved  (6,483)
+PASS  summary opens on hover (cold)  469 ms after the cursor arrived
+PASS  focus unchanged on hover  fg 919884 pid 10284 overlay=False
+PASS  summary opens inward  (68,348)-(364,619)
+PASS  summary click-through  
+PASS  closes after leaving  350 ms after the cursor left
+PASS  summary opens on hover (warm)  191 ms after the cursor arrived
+PASS  sweep does not open  
+PASS  rail corner click-through  
+PASS  switch keeps the card open  
+PASS  focus unchanged after switch  fg 919884 pid 10284 overlay=False
+PASS  controller batches traced  76 batches
+PASS  no re-entrant batch  
+PASS  single owner thread  
+PASS  batch latency  median 0,10 ms, max 143,51 ms
+Summary: 19/19 passed

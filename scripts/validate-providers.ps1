@@ -28,6 +28,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Debug builds: a separate single-instance name, so validation runs beside an
+# installed copy that may be running, without stopping it.
+$env:AURORA_INSTANCE = 'validation'
 Add-Type -TypeDefinition @'
 using System;
 using System.Collections.Generic;
@@ -69,7 +72,7 @@ function Check([string] $name, [bool] $ok, [string] $detail = '') {
 
 $Exe = (Resolve-Path $Exe).Path
 $cdp = Join-Path $PSScriptRoot 'cdp-eval.mjs'
-$all = @('codex', 'claudeCode', 'gemini', 'grok')
+$all = @('codex', 'claudeCode', 'antigravity', 'grok')
 $original = New-Object Rail+POINT
 [Rail]::GetCursorPos([ref] $original) | Out-Null
 $work = [Rail]::WorkArea()
@@ -78,7 +81,7 @@ function Preferences([string[]] $enabled) {
     $providers = [ordered]@{}
     foreach ($id in $all) { $providers[$id] = [ordered]@{ enabled = $enabled -contains $id; metric = $null; alerts = $true } }
     [ordered]@{
-        version = 2; side = $Side; monitor = $null; providers = $providers
+        version = 3; side = $Side; monitor = $null; providers = $providers
         launchAtStartup = $false; railVisible = $true
         notifications = [ordered]@{
             enabled = $false; thresholds = @(85, 95, 100); renewal = $true; auth = $true; reconnect = $false
@@ -190,8 +193,8 @@ try {
     $scenarios = @(
         , @('codex')
         , @('codex', 'claudeCode')
-        , @('codex', 'claudeCode', 'gemini')
-        , @('codex', 'claudeCode', 'gemini', 'grok')
+        , @('codex', 'claudeCode', 'antigravity')
+        , @('codex', 'claudeCode', 'antigravity', 'grok')
         , @('codex', 'grok')
     )
     foreach ($enabled in $scenarios) {
@@ -221,15 +224,15 @@ try {
         } finally { Stop-Rail $run }
     }
 
-    # Disabling the hovered provider from the settings window.
-    $enabled = @('codex', 'claudeCode', 'gemini', 'grok')
+    # Disabling the hovered provider (Antigravity, slot 2) from the settings window.
+    $enabled = @('codex', 'claudeCode', 'antigravity', 'grok')
     $run = Start-Rail $enabled -Settings
     try {
         $layout = Check-Layout $run $enabled 'live change · before'
         $slot = 2
         $centerY = $layout.rect.Top + [int](($slot * 66 + 26) * $layout.scale)
         [Rail]::SetCursorPos($layout.edgeX, $centerY) | Out-Null
-        Check 'live change · gemini card open' ((WaitVisible $run.summary 2500) -ge 0)
+        Check 'live change · antigravity card open' ((WaitVisible $run.summary 2500) -ge 0)
         $script = @'
 (async () => {
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -237,9 +240,9 @@ try {
   const invoke = window.__TAURI_INTERNALS__.invoke;
   const view = await invoke("get_settings");
   const preferences = structuredClone(view.preferences);
-  preferences.providers.gemini.enabled = false;
+  preferences.providers.antigravity.enabled = false;
   const saved = await invoke("set_preferences", { preferences });
-  return saved.preferences.providers.gemini.enabled;
+  return saved.preferences.providers.antigravity.enabled;
 })()
 '@
         $answer = $script | node $cdp $Port 'settings.html' - 2>&1

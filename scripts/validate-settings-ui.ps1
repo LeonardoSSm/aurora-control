@@ -21,6 +21,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Debug builds: a separate single-instance name, so validation runs beside an
+# installed copy that may be running, without stopping it.
+$env:AURORA_INSTANCE = 'validation'
 Add-Type -TypeDefinition @'
 using System;
 using System.Collections.Generic;
@@ -138,7 +141,7 @@ try {
 
     $run = Start-App
     $ui = Invoke-Page 'return state();'
-    Check 'window: version and defaults' ($ui.version -eq 'v0.3.0' -and $ui.side -eq 'Direita' -and $ui.startup -eq 'false' -and $ui.codex -eq 'true') ("{0} {1} startup={2}" -f $ui.version, $ui.side, $ui.startup)
+    Check 'window: version and defaults' ($ui.version -eq 'v0.3.1' -and $ui.side -eq 'Direita' -and $ui.startup -eq 'false' -and $ui.codex -eq 'true') ("{0} {1} startup={2}" -f $ui.version, $ui.side, $ui.startup)
 
     # Side through the UI: saved and applied live.
     $ui = Invoke-Page 'button("Esquerda").click(); await settled(); return state();'

@@ -1,0 +1,17 @@
+# cycle-03-1-validate-settings.txt · build eca2a91 + working tree · 2026-11-24 06:02 -03:00 · Windows 10.0.26300.0 · beside a running installed copy (AURORA_INSTANCE)
+PASS  defaults: right edge  x 1860..1920
+PASS  defaults: two indicators  height 118
+PASS  second instance exits  exit code 0
+PASS  first instance keeps running  
+PASS  saved side: left edge  x 0
+PASS  one provider: single circle  height 52
+PASS  monitor fallback: primary  x 1860..1920
+PASS  monitor fallback: choice kept  
+PASS  corrupted: app starts on defaults  
+PASS  corrupted: original kept aside  preferences.corrupt-20261124T090237Z.json
+PASS  corrupted: no partial write  
+PASS  newer version: defaults in use  
+PASS  newer version: file untouched  
+PASS  AURORA_SIDE overrides  
+PASS  override not persisted  
+Summary: 15/15 passed

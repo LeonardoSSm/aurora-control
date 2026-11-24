@@ -1,26 +1,26 @@
 # Aurora Control
 
-Barra de utilização para Windows 11 com indicadores semicirculares de Codex, Claude Code, Gemini e Grok, e alertas nativos de consumo, renovação e sessão. O app lê a sessão local de cada ferramenta e, onde existe uma fonte autorizada, consulta o consumo real da conta, sem renovar tokens nem alterar arquivos dos provedores.
+Barra de utilização para Windows 11 com indicadores semicirculares de Codex, Claude Code, Antigravity e Grok, e alertas nativos de consumo, renovação e sessão. O app lê a sessão local de cada ferramenta e, onde existe uma fonte autorizada, consulta o consumo real da conta, sem renovar tokens nem alterar arquivos dos provedores.
 
-| Provedor    | Situação na 0.3.0                                                                                                       |
-| ----------- | ----------------------------------------------------------------------------------------------------------------------- |
-| Codex       | Cotas reais da conta ChatGPT (5 h, semanal, créditos).                                                                  |
-| Claude Code | Cotas reais da assinatura (5 h, semanal, por modelo, uso extra) e atividade local.                                      |
-| Gemini      | Só a sessão local. Os termos do Gemini CLI proíbem que outro software use esse login para consultar cotas.              |
-| Grok        | Só a sessão local. A consulta de créditos do Grok Build está pronta, mas desligada até a verificação dos termos da xAI. |
+| Provedor    | Situação na 0.3.0                                                                                                              |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| Codex       | Cotas reais da conta ChatGPT (5 h, semanal, créditos).                                                                         |
+| Claude Code | Cotas reais da assinatura (5 h, semanal, por modelo, uso extra) e atividade local.                                             |
+| Antigravity | Cotas reais (5 h e semanal por grupo de modelos) pelo CLI oficial `agy`, em modo somente leitura. Substitui o Gemini da 0.3.0. |
+| Grok        | Só a sessão local. A consulta de créditos do Grok Build está pronta, mas desligada até a verificação dos termos da xAI.        |
 
 Detalhes em [Compatibilidade dos provedores](docs/provider-compatibility.md).
 
 ## Uso
 
-1. Abra `aurora-control.exe`. Os semicírculos dos provedores ativos ficam presos à lateral da área útil do monitor escolhido (por padrão, o principal à direita), centralizados e na ordem Codex, Claude Code, Gemini, Grok. O arco de cada um mostra o consumo da métrica escolhida (por padrão, a janela mais restritiva): vazio em 0%, até o ponto mais interno em 50% e até o topo em 100%. Uma janela que renovou desde a última leitura aparece como "—", aguardando nova medição. Um ponto discreto indica um provedor que precisa de atenção.
+1. Abra `aurora-control.exe`. Os semicírculos dos provedores ativos ficam presos à lateral da área útil do monitor escolhido (por padrão, o principal à direita), centralizados e na ordem Codex, Claude Code, Antigravity, Grok. O arco de cada um mostra o consumo da métrica escolhida (por padrão, a janela mais restritiva): vazio em 0%, até o ponto mais interno em 50% e até o topo em 100%. Uma janela que renovou desde a última leitura aparece como "—", aguardando nova medição. Um ponto discreto indica um provedor que precisa de atenção.
 2. Pare o ponteiro sobre um indicador. O círculo desliza para dentro e o resumo mostra a conta, a métrica, a renovação, as outras cotas, a atividade local e o estado da conexão. Você pode levar o cursor até o resumo sem que ele feche, e os cliques passam através dele.
 3. Clique em um indicador ou use "Atualizar agora" na bandeja para forçar uma leitura. O app consulta a cada 5 minutos e respeita os limites dos provedores: depois de uma recusa de credencial ou de um `Retry-After`, o clique espera o mesmo prazo, a menos que você entre novamente na conta.
 4. Clique no ícone da bandeja para mostrar ou ocultar a barra (a escolha é lembrada). O menu de contexto permite atualizar, escolher a lateral, abrir as configurações ou encerrar. Se o ícone estiver recolhido, abra a área de ícones ocultos da bandeja.
 5. Em "Configurações…":
    - **Geral:** inicialização com o Windows, visibilidade da barra e versão instalada.
    - **Aparência e posicionamento:** lateral e monitor.
-   - **Provedores:** ative cada provedor (Gemini e Grok começam desativados), veja o estado da conexão, a conta, a última leitura e o diagnóstico de autenticação, e escolha a métrica do indicador (automática, janela de 5 h, semanal, cota de um modelo…).
+   - **Provedores:** ative cada provedor (Antigravity e Grok começam desativados), veja o estado da conexão, a conta, a última leitura e o diagnóstico de autenticação, e escolha a métrica do indicador (automática, janela de 5 h, semanal, cota de um modelo…).
    - **Notificações:** ative os alertas, escolha os limites (70, 85, 95, 100%), alertas de renovação, de sessão e de reconexão, alertas por provedor, horário silencioso e uma notificação de teste.
 
    As escolhas ficam em `%APPDATA%\app.auroracontrol.desktop\preferences.json`. Preferências da 0.2.0 são migradas sem perder nada. Com nenhum provedor ativo, a barra fica oculta, e a bandeja continua disponível. Se o monitor escolhido for desconectado, a barra usa o principal e volta a ele quando for reconectado.
@@ -29,9 +29,9 @@ Os alertas só são emitidos quando uma leitura nova cruza um limite, ou quando 
 
 Uma segunda execução encerra sem abrir outra barra: só uma instância roda por sessão do Windows.
 
-Requisitos das contas: Codex autenticado com ChatGPT (`codex login`) e Claude Code autenticado no terminal (`claude`). Logins por chave de API não expõem cotas de assinatura, e o app informa isso. Se o Claude Code roda dentro do app Claude Desktop, a credencial não fica no arquivo do CLI e o diagnóstico mostra esse estado. Para Gemini e Grok, o app só reconhece a sessão do Gemini CLI ("Login with Google") e do Grok Build (`grok login`).
+Requisitos das contas: Codex autenticado com ChatGPT (`codex login`) e Claude Code autenticado no terminal (`claude`). Logins por chave de API não expõem cotas de assinatura, e o app informa isso. Se o Claude Code roda dentro do app Claude Desktop, a credencial não fica no arquivo do CLI e o diagnóstico mostra esse estado. Para o Antigravity, instale o Antigravity CLI (`agy`) e entre com a conta Google; o app executa só `agy -p /usage`, que não gasta cota. Para o Grok, o app reconhece a sessão do Grok Build (`grok login`).
 
-Variáveis opcionais: `AURORA_SIDE=left` inicia na esquerda nesta sessão, acima da preferência salva. `AURORA_DEMO=1`, ou `AURORA_DEMO=73,25,82,21` para escolher os percentuais de Codex, Claude Code, Gemini e Grok, usa dados fictícios sem acessar contas nem rede; dados de demonstração nunca geram alertas. `AURORA_TRACE=1` registra no console os lotes do controlador de janelas. Em builds de depuração, `AURORA_OPEN_SETTINGS=1` abre as configurações ao iniciar e `AURORA_CONFIG_DIR` troca a pasta de preferências (os scripts de validação usam isso para não tocar nas suas preferências reais).
+Variáveis opcionais: `AURORA_SIDE=left` inicia na esquerda nesta sessão, acima da preferência salva. `AURORA_DEMO=1`, ou `AURORA_DEMO=73,25,82,21` para escolher os percentuais de Codex, Claude Code, Antigravity e Grok, usa dados fictícios sem acessar contas nem rede; dados de demonstração nunca geram alertas. `AURORA_TRACE=1` registra no console os lotes do controlador de janelas. Em builds de depuração, `AURORA_OPEN_SETTINGS=1` abre as configurações ao iniciar e `AURORA_CONFIG_DIR` troca a pasta de preferências e `AURORA_INSTANCE` troca o nome da instância única (os scripts de validação usam isso para não tocar nas suas preferências nem na cópia instalada em execução).
 
 ## Compilação no Windows
 
@@ -66,6 +66,7 @@ Use `npm run desktop:debug` para compilar o binário de depuração em `src-taur
 - [Decisões de arquitetura](docs/architecture.md)
 - [Compatibilidade dos provedores](docs/provider-compatibility.md)
 - [Motor de notificações](docs/notification-engine.md)
+- [Ciclo 03.1: implementação](docs/cycle-03-1/implementation-report.md) e [validação](docs/cycle-03-1/validation-report.md)
 - [Implementação do Ciclo 03 para auditoria](docs/audit-cycle-03-implementation.md)
 - [Implementação do Ciclo 02 para auditoria](docs/audit-cycle-02-implementation.md)
 - [Auditoria da baseline do Ciclo 02](docs/audit-cycle-02-baseline.md)

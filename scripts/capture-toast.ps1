@@ -23,6 +23,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Debug builds: a separate single-instance name, so validation runs beside an
+# installed copy that may be running, without stopping it.
+$env:AURORA_INSTANCE = 'validation'
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 $cdp = Join-Path $PSScriptRoot 'cdp-eval.mjs'
 $profile = Join-Path ([IO.Path]::GetTempPath()) ('aurora-toast-' + [guid]::NewGuid())

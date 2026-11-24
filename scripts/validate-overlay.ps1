@@ -18,6 +18,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Debug builds: a separate single-instance name, so validation runs beside an
+# installed copy that may be running, without stopping it.
+$env:AURORA_INSTANCE = 'validation'
 Add-Type -TypeDefinition @'
 using System;
 using System.Collections.Generic;
