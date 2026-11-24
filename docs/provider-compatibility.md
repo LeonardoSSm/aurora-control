@@ -1,15 +1,15 @@
 # Compatibilidade dos provedores
 
-Situação na versão 0.3.1, em 24/11/2026. O catálogo dos provedores fica em [`src/usage/catalog.json`](../src/usage/catalog.json), compartilhado por Rust e TypeScript. A investigação do Ciclo 03.1 está em [`docs/cycle-03-1/`](cycle-03-1/implementation-report.md).
+Situação na versão 1.0.0, em 24/11/2026. O catálogo dos provedores fica em [`src/usage/catalog.json`](../src/usage/catalog.json), compartilhado por Rust e TypeScript. As investigações estão em [`docs/cycle-03-1/`](cycle-03-1/implementation-report.md) e [`docs/cycle-04/`](cycle-04/grok-cursor-research.md).
 
 ## Resumo
 
-| Provedor    | Classificação da fonte                | Autenticação detectada              | Consulta real validada                   | Cotas acessíveis                                        | Situação                                                    |
-| ----------- | ------------------------------------- | ----------------------------------- | ---------------------------------------- | ------------------------------------------------------- | ----------------------------------------------------------- |
-| Codex       | Endpoint do cliente oficial (interno) | Sim (`~/.codex/auth.json`)          | **Sim**, 24/11/2026                      | 5 h, semanal, créditos; registro local como fallback    | Integrado                                                   |
-| Claude Code | Endpoint do cliente oficial (interno) | Sim (`~/.claude/.credentials.json`) | **Sim**, 24/11/2026                      | 5 h, semanal, por modelo, uso extra; tokens locais      | Integrado                                                   |
-| Antigravity | **CLI oficial** (`agy -p /usage`)     | Pelo próprio CLI (`agy.exe`)        | **Sim**, 24/11/2026, conferida com o CLI | 5 h e semanal por grupo (Gemini; Claude e GPT)          | Integrado, sem identidade de conta (sem alertas de consumo) |
-| Grok        | **Fonte bloqueada**                   | Sim (`~/.grok/auth.json`)           | **Não**: consulta desligada              | Franquia semanal ou mensal identificada, parser testado | Bloqueado até a verificação dos termos da xAI               |
+| Provedor      | Classificação da fonte                                               | Autenticação detectada              | Consulta real validada                                    | Cotas acessíveis                                                      | Situação                                                                                  |
+| ------------- | -------------------------------------------------------------------- | ----------------------------------- | --------------------------------------------------------- | --------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| Codex         | Endpoint do cliente oficial (interno)                                | Sim (`~/.codex/auth.json`)          | **Sim**, 24/11/2026                                       | 5 h, semanal, créditos; registro local como fallback                  | Integrado                                                                                 |
+| Claude Code   | Endpoint do cliente oficial (interno)                                | Sim (`~/.claude/.credentials.json`) | **Sim**, 24/11/2026                                       | 5 h, semanal, por modelo, uso extra; tokens locais                    | Integrado                                                                                 |
+| Antigravity   | **CLI oficial** (`agy -p /usage`)                                    | Pelo próprio CLI (`agy.exe`)        | **Sim**, 24/11/2026, conferida com o CLI                  | 5 h e semanal por grupo (Gemini; Claude e GPT)                        | Integrado, sem identidade de conta (sem alertas de consumo)                               |
+| Grok / Cursor | **Registro local do cliente oficial** (`~/.grok/logs/unified.jsonl`) | Sim (`~/.grok/auth.json`)           | **Sim**, 24/11/2026, conferida com o registro do `/usage` | Franquia semanal compartilhada por Grok e Cursor (cobrança unificada) | Integrado, com conta verificada; leitura só tão recente quanto o último uso do Grok Build |
 
 "Consulta real validada" significa que o app leu dados reais de uma conta autenticada, não apenas fixtures. Os testes automatizados usam só fixtures sintéticas.
 
@@ -84,33 +84,44 @@ O documento [`docs/resources/tos-privacy.md`](https://github.com/google-gemini/g
 - **Alternativas legítimas:** (1) mostrar os números do `/stats` dentro do próprio CLI; (2) ler, sem rede, estatísticas de tokens que o CLI grava localmente, como atividade e nunca como percentual de cota; (3) para chave de API ou Vertex, consultar cotas de projeto pela Cloud Monitoring com credenciais do próprio usuário e consentimento explícito; (4) uma API oficial de cotas, se o Google publicar uma.
 - **Reconexão:** executar `gemini` e escolher "Login with Google".
 
-## Grok (xAI)
+## Grok / Cursor (xAI)
 
-### O que foi investigado
+### Situação na 1.0.0
+
+- **Fonte das métricas:** o registro `billing: fetched credits config` que o próprio Grok Build grava em `$GROK_HOME/logs/unified.jsonl` sempre que consulta a franquia (início, cada prompt, `/usage`, poll). O app só lê o arquivo; não chama a xAI, não executa o CLI e não usa o token.
+- **Conta:** o usuário do processo que escreveu o registro (linha `auth init user_info check` do mesmo `pid`) precisa ser o do `auth.json` atual; caso contrário, nada é exibido (`awaitingClient`). Alertas de consumo ficam permitidos porque a conta é verificada.
+- **Franquia compartilhada:** `isUnifiedBillingUser: true` indica a cobrança unificada (o pool semanal que a documentação do Cursor descreve como compartilhado entre Grok e Cursor). Só então o rótulo é "Franquia semanal compartilhada". Créditos pré-pagos e sob demanda nunca entram no indicador.
+- **Limitações:** a leitura só é tão recente quanto o último uso do Grok Build; o consumo feito apenas no Cursor ou no app Grok aparece quando o Grok Build consultar de novo. Formato de log não documentado (validado no Grok Build 1.0.92).
+- **Validação real:** 24/11/2026, Grok Build 1.0.92: 100% da franquia semanal, período de 20/11 a 27/11, conta atribuída, idêntico ao último `/usage` registrado.
+- **Reconexão:** `grok login`, e abrir o Grok Build (ou usar `/usage`) para gravar um registro novo.
+
+A investigação completa, inclusive ACP, `grok usage --json` e Cursor, está em [Grok e Cursor](cycle-04/grok-cursor-research.md). A seção abaixo registra a investigação do Ciclo 03 e continua válida para a consulta direta, que segue desligada.
+
+### O que foi investigado (Ciclo 03)
 
 - **Grok Build**, o CLI oficial de código da xAI ([xai-org/grok-build](https://github.com/xai-org/grok-build), Apache-2.0, commit `2bdd1d6` de 29/09/2026). O login (`grok login`, OAuth em `auth.x.ai`) grava `~/.grok/auth.json` (ou `$GROK_HOME/auth.json`): um objeto por emissor e cliente, com `key`, `auth_mode` (`oidc`, `external`, `api_key`), `user_id`, `email`, `team_id`, `expires_at` (ou `create_time` mais 30 dias) e `oidc_issuer`. O CLI renova o token sozinho e relê o arquivo quando ele muda.
 - O comando `/usage` do Grok Build (`crates/codegen/xai-grok-shell/src/extensions/billing.rs`) chama `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits` com `Authorization: Bearer <sessão>`, `X-XAI-Token-Auth: xai-grok-cli` e `x-userid`. A resposta traz `config.creditUsagePercent` (0–100 da franquia incluída), `config.currentPeriod` (`USAGE_PERIOD_TYPE_WEEKLY` ou mensal, com início e fim), gastos sob demanda e saldo pré-pago. É a franquia da **conta grok.com** (SuperGrok e planos afins), não um limite de chave de API.
 - **API xAI** ([docs.x.ai](https://docs.x.ai/docs/management-api)): uso, saldo, limites de gastos e limites por modelo de uma **equipe** só pela Management API (`management-api.x.ai`), com chave de gerenciamento. Uma chave de API comum só consulta o próprio estado em `GET https://api.x.ai/v1/api-key` (o Grok Build usa isso para saber se a chave está bloqueada ou desativada), sem consumo nem saldo. Nada disso é cota de assinatura pessoal, e o app não apresenta como tal.
 - **Planos do X (Premium/Premium+)** e o grok.com na web: nenhuma API documentada expõe a cota restante. Scraping e cookies estão fora de questão.
 
-### Bloqueio
+### Consulta direta (desligada)
 
 O endpoint do Grok Build é interno, e os termos de serviço da xAI (`x.ai/legal/terms-of-service`) responderam HTTP 403 durante a investigação. Não foi possível verificar se permitem que software de terceiros use a sessão do Grok Build. Até essa verificação, a consulta fica desligada:
 
 - **Modalidades suportadas:** sessão do Grok Build emitida por `x.ai` (`oidc` ou `external`). Chave de API é conta incompatível.
 - **Fonte de autenticação:** `~/.grok/auth.json`, somente leitura, até 256 KiB. Sessão expirada vira `authExpired`; arquivo ilegível vira `credentialsInvalid`.
-- **Fonte das métricas:** implementada e testada com fixtures (`grok::parse_billing`), mas **desativada** por `grok::LIVE_QUERY_AUTHORIZED = false`. Sem essa permissão, o estado é `sourceBlocked: termsUnverified` e nenhuma requisição sai do app.
+- **Fonte das métricas:** implementada e testada com fixtures (`grok::parse_response`), mas **desativada** por `grok::LIVE_QUERY_AUTHORIZED = false`. Sem essa permissão, nenhuma requisição sai do app, e a fonte é o registro local.
 - **Cotas acessíveis (quando liberado):** `grok-credits` (franquia semanal ou mensal, com renovação no fim do período) e uso sob demanda como créditos.
 - **Interfaces internas:** sim, `cli-chat-proxy.grok.com` é interno ao Grok Build.
-- **Validação real:** nesta máquina não há Grok Build (`~/.grok` não existe); o app informou `authMissing`, o estado verdadeiro. A consulta real nunca foi executada.
-- **Como liberar:** depois que o proprietário ler os termos da xAI e concluir que o uso é permitido, mudar `LIVE_QUERY_AUTHORIZED` para `true` em [`grok.rs`](../src-tauri/src/usage/grok.rs) e validar com uma conta real. O teste `without_verified_terms_the_session_is_read_but_xai_is_never_contacted` precisa ser ajustado na mesma revisão.
+- **Validação real:** a consulta direta nunca foi executada.
+- **Como liberar:** depois que o proprietário ler os termos da xAI e concluir que o uso é permitido, mudar `LIVE_QUERY_AUTHORIZED` para `true` em [`grok.rs`](../src-tauri/src/usage/grok.rs) e validar com uma conta real. O teste `the_local_record_of_the_signed_in_account_is_the_shared_weekly_allowance` verifica a chave e precisa ser ajustado na mesma revisão.
 - **Riscos:** endpoint interno sujeito a mudanças; possível violação dos termos; a renovação do token continua sendo do Grok Build.
 - **Alternativas legítimas:** o `/usage` do próprio Grok Build; a Management API para equipes que optarem por fornecer uma chave de gerenciamento (fora do escopo deste ciclo).
 - **Reconexão:** `grok login`.
 
 ## Regras comuns
 
-- Nenhum adaptador renova tokens, executa CLIs, grava arquivos dos provedores, lê cookies ou navegadores, ou acessa memória de processos.
+- Nenhum adaptador renova tokens, grava arquivos dos provedores, lê cookies ou navegadores, ou acessa memória de processos. O único CLI executado é o `agy` (Antigravity), com comando somente leitura, dentro de um Job Object.
 - Credenciais são lidas no Rust, usadas apenas no cabeçalho da requisição e descartadas; nunca chegam ao WebView, aos logs ou às preferências.
 - Provedores desativados não leem arquivos, não fazem requisições, não têm diagnóstico e não geram alertas.
 - Cada provedor tem worker, cache, identidade, política de atualização e tratamento de falhas próprios; um pânico ou um `Retry-After` longo de um não afeta os outros.

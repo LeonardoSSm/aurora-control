@@ -1,0 +1,57 @@
+PASS  0 · rail hidden  hwnd 13961354
+PASS  0 · process alive  
+PASS  1 [codex] · rail visible  
+PASS  1 [codex] height  52px, expected 52
+PASS  1 [codex] centered  above 490, below 490
+PASS  1 [codex] region  1/1 circles hit, 0/0 gaps pass through
+PASS  1 [codex] · hover slot 0 (codex)  opened in 247 ms, card center 516.5 vs slot 516
+PASS  1 [codex] · focus unchanged  
+PASS  1 [codex] · closes after leaving  
+PASS  2 [codex,claudeCode] · rail visible  
+PASS  2 [codex,claudeCode] height  118px, expected 118
+PASS  2 [codex,claudeCode] centered  above 457, below 457
+PASS  2 [codex,claudeCode] region  2/2 circles hit, 1/1 gaps pass through
+PASS  2 [codex,claudeCode] · hover slot 0 (codex)  opened in 225 ms, card center 483.5 vs slot 483
+PASS  2 [codex,claudeCode] · hover slot 1 (claudeCode)  opened in 204 ms, card center 549 vs slot 549
+PASS  2 [codex,claudeCode] · focus unchanged  
+PASS  2 [codex,claudeCode] · closes after leaving  
+PASS  3 [codex,claudeCode,antigravity] · rail visible  
+PASS  3 [codex,claudeCode,antigravity] height  184px, expected 184
+PASS  3 [codex,claudeCode,antigravity] centered  above 424, below 424
+PASS  3 [codex,claudeCode,antigravity] region  3/3 circles hit, 2/2 gaps pass through
+PASS  3 [codex,claudeCode,antigravity] · hover slot 0 (codex)  opened in 231 ms, card center 450.5 vs slot 450
+PASS  3 [codex,claudeCode,antigravity] · hover slot 1 (claudeCode)  opened in 192 ms, card center 516 vs slot 516
+PASS  3 [codex,claudeCode,antigravity] · hover slot 2 (antigravity)  opened in 177 ms, card center 582 vs slot 582
+PASS  3 [codex,claudeCode,antigravity] · focus unchanged  
+PASS  3 [codex,claudeCode,antigravity] · closes after leaving  
+PASS  4 [codex,claudeCode,antigravity,grok] · rail visible  
+PASS  4 [codex,claudeCode,antigravity,grok] height  250px, expected 250
+PASS  4 [codex,claudeCode,antigravity,grok] centered  above 391, below 391
+PASS  4 [codex,claudeCode,antigravity,grok] region  4/4 circles hit, 3/3 gaps pass through
+PASS  4 [codex,claudeCode,antigravity,grok] · hover slot 0 (codex)  opened in 258 ms, card center 417.5 vs slot 417
+PASS  4 [codex,claudeCode,antigravity,grok] · hover slot 1 (claudeCode)  opened in 207 ms, card center 483 vs slot 483
+PASS  4 [codex,claudeCode,antigravity,grok] · hover slot 2 (antigravity)  opened in 205 ms, card center 549 vs slot 549
+PASS  4 [codex,claudeCode,antigravity,grok] · hover slot 3 (grok)  opened in 185 ms, card center 615 vs slot 615
+PASS  4 [codex,claudeCode,antigravity,grok] · focus unchanged  
+PASS  4 [codex,claudeCode,antigravity,grok] · closes after leaving  
+PASS  2 [codex,grok] · rail visible  
+PASS  2 [codex,grok] height  118px, expected 118
+PASS  2 [codex,grok] centered  above 457, below 457
+PASS  2 [codex,grok] region  2/2 circles hit, 1/1 gaps pass through
+PASS  2 [codex,grok] · hover slot 0 (codex)  opened in 232 ms, card center 483.5 vs slot 483
+PASS  2 [codex,grok] · hover slot 1 (grok)  opened in 184 ms, card center 549 vs slot 549
+PASS  2 [codex,grok] · focus unchanged  
+PASS  2 [codex,grok] · closes after leaving  
+PASS  live change · before height  250px, expected 250
+PASS  live change · before centered  above 391, below 391
+PASS  live change · before region  4/4 circles hit, 3/3 gaps pass through
+PASS  live change · antigravity card open  
+PASS  live change · saved  false
+PASS  live change · card closed  
+PASS  live change · after height  184px, expected 184
+PASS  live change · after centered  above 424, below 424
+PASS  live change · after region  3/3 circles hit, 2/2 gaps pass through
+PASS  live change · new slot 2 opens  
+PASS  live change · process alive  
+PASS  real preferences untouched  
+Summary: 56/56 passed
