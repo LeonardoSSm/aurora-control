@@ -8,7 +8,7 @@ use tauri::{AppHandle, Manager};
 use crate::autostart;
 use crate::preferences::{LoadStatus, Preferences, Store, THRESHOLDS};
 use crate::usage::catalog::{self, Capability, Integration};
-use crate::usage::{Diagnostics, Issue, Provider, QuotaKind, Reading, Service, Usage};
+use crate::usage::{Diagnostics, Issue, Origin, Provider, QuotaKind, Reading, Service, Usage};
 use crate::windows::{self, monitors};
 
 /// A metric the ring of a provider may show.
@@ -34,6 +34,8 @@ pub struct ProviderView {
     reconnect: &'static str,
     /// `available`, `stale` or `unavailable`.
     status: &'static str,
+    /// Where the last valid reading came from (API, official CLI, local log).
+    origin: Option<Origin>,
     issue: Option<Issue>,
     account: Option<String>,
     plan: Option<String>,
@@ -85,6 +87,7 @@ fn provider_view(usage: Usage) -> ProviderView {
             Reading::Stale { .. } => "stale",
             Reading::Unavailable => "unavailable",
         },
+        origin: usage.origin,
         issue: usage.issue,
         account: usage.account,
         plan: usage.plan,

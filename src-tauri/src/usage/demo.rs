@@ -1,8 +1,8 @@
 //! Fictitious readings for tests and visual validation. Enabled with
-//! `AURORA_DEMO=1`, or `AURORA_DEMO=<codex>,<claude>,<gemini>,<grok>` to
+//! `AURORA_DEMO=1`, or `AURORA_DEMO=<codex>,<claude>,<antigravity>,<grok>` to
 //! choose the primary percentages. Never touches the network or provider
 //! files. Every reading is marked `source: demo` and shown as a demonstration:
-//! the Gemini and Grok fixtures exist to validate the four-indicator layout,
+//! the Antigravity and Grok fixtures exist to validate the four-indicator layout,
 //! not to stand in for a quota source those providers do not have.
 
 use chrono::{DateTime, TimeDelta, Utc};
@@ -114,20 +114,27 @@ impl UsageAdapter for DemoAdapter {
                     now + hour * 90,
                 ),
             ],
-            Provider::Gemini => vec![
+            Provider::Antigravity => vec![
                 window(
-                    "gemini-pro",
-                    "Diária · Gemini Pro",
+                    "agy-gemini-5h",
+                    "Gemini · 5 h",
                     self.percent,
-                    1_440,
-                    now + hour * 9,
+                    300,
+                    now + hour * 4,
                 ),
                 window(
-                    "gemini-flash",
-                    "Diária · Gemini Flash",
+                    "agy-gemini-weekly",
+                    "Gemini · Semanal",
                     secondary,
-                    1_440,
-                    now + hour * 9,
+                    10_080,
+                    now + hour * 160,
+                ),
+                window(
+                    "agy-3p-5h",
+                    "Claude e GPT · 5 h",
+                    secondary / 2,
+                    300,
+                    now + hour * 3,
                 ),
             ],
             Provider::Grok => vec![window(

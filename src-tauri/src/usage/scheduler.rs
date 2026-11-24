@@ -1337,7 +1337,7 @@ mod tests {
                 session: account("A"),
                 account: Some("a•••@example.com".into()),
                 ..Outcome::failed(FetchError::SourceBlocked(
-                    crate::usage::model::BlockReason::ProviderTerms,
+                    crate::usage::model::BlockReason::TermsUnverified,
                 ))
             },
             at(0),
@@ -1347,7 +1347,7 @@ mod tests {
         assert_eq!(
             usage.issue,
             Some(Issue::SourceBlocked {
-                reason: crate::usage::model::BlockReason::ProviderTerms
+                reason: crate::usage::model::BlockReason::TermsUnverified
             })
         );
         assert_eq!(usage.account.as_deref(), Some("a•••@example.com"));

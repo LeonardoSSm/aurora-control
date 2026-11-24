@@ -20,10 +20,12 @@ use super::model::Provider;
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Integration {
-    /// Reads real quota data from the provider.
+    /// Reads real quota data from the endpoint the provider's own client
+    /// uses (Codex, Claude Code).
     Live,
-    /// Detects the local sign-in only: no authorized quota source exists.
-    AuthOnly,
+    /// Reads real quota data through a read-only command of the provider's
+    /// official CLI, in its documented non-interactive mode (Antigravity).
+    Cli,
     /// A quota source is implemented but switched off until its terms of use
     /// are verified (see `docs/provider-compatibility.md`).
     Gated,
@@ -104,7 +106,7 @@ mod tests {
             .map(|entry| entry.id)
             .collect();
         assert_eq!(enabled, [Provider::Codex, Provider::ClaudeCode]);
-        assert_eq!(entry(Provider::Gemini).integration, Integration::AuthOnly);
+        assert_eq!(entry(Provider::Antigravity).integration, Integration::Cli);
         assert_eq!(entry(Provider::Grok).integration, Integration::Gated);
         assert_eq!(name(Provider::ClaudeCode), "Claude Code");
     }

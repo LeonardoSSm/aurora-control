@@ -99,6 +99,9 @@ pub trait UsageAdapter: Send + Sync + 'static {
     fn session(&self, _now: DateTime<Utc>) -> Option<Session> {
         None
     }
+    /// The provider was disabled: stop any work in progress (for example a
+    /// running CLI). Called from the thread that changes the preferences.
+    fn cancel(&self) {}
     /// A sign-in diagnosis from local files only, for the settings window.
     fn diagnostics(&self, _now: DateTime<Utc>) -> Option<Vec<DiagnosticRow>> {
         None

@@ -7,8 +7,9 @@
 //! identities are never written here (audit I07, M04).
 //!
 //! Versions: 1 (0.2.0) had two provider switches; 2 (0.3.0) has one entry
-//! per catalog provider and the notification settings. [`migrate`] upgrades
-//! version 1 documents, keeping every choice; providers added in 0.3.0 start
+//! per catalog provider and the notification settings; 3 (0.3.1) replaces
+//! Gemini with Antigravity. [`migrate`] upgrades older documents one version
+//! at a time, keeping every choice; providers added in a version start
 //! disabled.
 //!
 //! Precedence: environment (`AURORA_SIDE`) > preferences > defaults. An
@@ -31,7 +32,7 @@ use crate::sync::lock;
 use crate::usage::{Provider, catalog};
 use crate::windows::Side;
 
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 const FILE: &str = "preferences.json";
 const MAX_FILE: u64 = 64 * 1024;
 const MAX_NAME: usize = 96;
@@ -85,7 +86,7 @@ impl ProviderChoice {
 pub struct Providers {
     pub codex: ProviderChoice,
     pub claude_code: ProviderChoice,
-    pub gemini: ProviderChoice,
+    pub antigravity: ProviderChoice,
     pub grok: ProviderChoice,
 }
 
@@ -95,7 +96,7 @@ impl Default for Providers {
         Self {
             codex: choice(Provider::Codex),
             claude_code: choice(Provider::ClaudeCode),
-            gemini: choice(Provider::Gemini),
+            antigravity: choice(Provider::Antigravity),
             grok: choice(Provider::Grok),
         }
     }
@@ -106,7 +107,7 @@ impl Providers {
         match provider {
             Provider::Codex => &self.codex,
             Provider::ClaudeCode => &self.claude_code,
-            Provider::Gemini => &self.gemini,
+            Provider::Antigravity => &self.antigravity,
             Provider::Grok => &self.grok,
         }
     }
@@ -322,7 +323,8 @@ fn migrate(mut value: Value, version: u64) -> Option<Value> {
                 json!({
                     "codex": choice(codex),
                     "claudeCode": choice(claude),
-                    // New in 0.3.0: off until the user turns them on.
+                    // New in 0.3.0: off until the user turns them on (the
+                    // Gemini slot becomes Antigravity in version 3).
                     "gemini": choice(false),
                     "grok": choice(false),
                 }),
@@ -335,7 +337,27 @@ fn migrate(mut value: Value, version: u64) -> Option<Value> {
             object.insert("version".into(), json!(2));
             migrate(value, 2)
         }
-        2 => Some(value),
+        2 => {
+            // 0.3.0 → 0.3.1: Google ended Gemini CLI sign-in for Gemini Code
+            // Assist for individuals and moved it to Antigravity. The Gemini
+            // slot becomes Antigravity, which runs the official CLI: it starts
+            // disabled whatever Gemini was, and its metric choice is reset
+            // (the quota ids differ). Its alert switch is kept.
+            let object = value.as_object_mut()?;
+            let providers = object.get_mut("providers")?.as_object_mut()?;
+            let gemini = providers.remove("gemini")?;
+            let alerts = gemini
+                .get("alerts")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            providers.insert(
+                "antigravity".into(),
+                json!({ "enabled": false, "metric": null, "alerts": alerts }),
+            );
+            object.insert("version".into(), json!(3));
+            migrate(value, 3)
+        }
+        3 => Some(value),
         _ => None,
     }
 }
@@ -540,7 +562,7 @@ mod tests {
         assert!(!preferences.providers.codex.enabled);
         assert!(preferences.providers.claude_code.enabled);
         // New providers stay off; nothing is read from them.
-        assert!(!preferences.providers.gemini.enabled);
+        assert!(!preferences.providers.antigravity.enabled);
         assert!(!preferences.providers.grok.enabled);
         assert_eq!(preferences.providers.visible(), [Provider::ClaudeCode]);
         assert!(
@@ -561,6 +583,50 @@ mod tests {
         );
     }
 
+    /// A document exactly as 0.3.0 wrote it, with Gemini enabled and its
+    /// alerts off.
+    const V2: &str = r#"{
+  "version": 2, "side": "right", "monitor": null,
+  "providers": {
+    "codex": { "enabled": true, "metric": "codex-primary", "alerts": true },
+    "claudeCode": { "enabled": false, "metric": null, "alerts": false },
+    "gemini": { "enabled": true, "metric": "gemini-pro", "alerts": false },
+    "grok": { "enabled": true, "metric": null, "alerts": true }
+  },
+  "launchAtStartup": true, "railVisible": false,
+  "notifications": { "enabled": true, "thresholds": [70, 100], "renewal": false, "auth": true,
+    "reconnect": true, "quiet": { "enabled": true, "start": 1380, "end": 360 } }
+}"#;
+
+    #[test]
+    fn a_version_2_file_becomes_antigravity_disabled_and_keeps_the_rest() {
+        let (preferences, migrated) = parse(V2).unwrap();
+        assert!(migrated);
+        assert_eq!(preferences.version, 3);
+        // Antigravity runs the official CLI: never enabled by a migration.
+        assert!(!preferences.providers.antigravity.enabled);
+        assert_eq!(preferences.providers.antigravity.metric, None);
+        assert!(
+            !preferences.providers.antigravity.alerts,
+            "alert switch kept"
+        );
+        // Everything else as written.
+        assert_eq!(
+            preferences.providers.codex.metric.as_deref(),
+            Some("codex-primary")
+        );
+        assert!(!preferences.providers.claude_code.enabled);
+        assert!(!preferences.providers.claude_code.alerts);
+        assert!(preferences.providers.grok.enabled);
+        assert!(preferences.launch_at_startup && !preferences.rail_visible);
+        assert_eq!(preferences.notifications.thresholds, [70, 100]);
+        assert!(!preferences.notifications.renewal && preferences.notifications.reconnect);
+        assert_eq!(preferences.notifications.quiet.start, 1380);
+        // A v2 document without the gemini entry is invalid, not guessed.
+        let broken = V2.replace("\"gemini\"", "\"other\"");
+        assert_eq!(parse(&broken).unwrap_err(), LoadStatus::Recovered);
+    }
+
     #[test]
     fn a_migrated_file_is_rewritten_only_when_the_user_saves() {
         let dir = TempDir::new("prefs-migrate");
@@ -572,15 +638,15 @@ mod tests {
         assert_eq!(fs::read_to_string(dir.path().join(FILE)).unwrap(), V1);
 
         let mut changed = store.get();
-        changed.providers.gemini.enabled = true;
+        changed.providers.antigravity.enabled = true;
         store.set(changed.clone()).unwrap();
         let restarted = Store::load(Some(dir.path().into()));
         assert_eq!(restarted.status(), LoadStatus::Loaded);
         assert_eq!(restarted.get(), changed);
         let written: Value =
             serde_json::from_str(&fs::read_to_string(dir.path().join(FILE)).unwrap()).unwrap();
-        assert_eq!(written["version"], 2);
-        assert_eq!(written["providers"]["gemini"]["enabled"], true);
+        assert_eq!(written["version"], 3);
+        assert_eq!(written["providers"]["antigravity"]["enabled"], true);
         assert_eq!(written["monitor"]["id"], "m-0123456789abcdef");
     }
 
@@ -629,7 +695,7 @@ mod tests {
     #[test]
     fn a_newer_version_is_left_untouched_until_the_user_saves() {
         let dir = TempDir::new("prefs-newer");
-        let future = r#"{"version": 3, "side": "left", "theme": "neon"}"#;
+        let future = r#"{"version": 9, "side": "left", "theme": "neon"}"#;
         dir.write(FILE, future);
         let store = Store::load(Some(dir.path().into()));
         assert_eq!(store.status(), LoadStatus::NewerVersion);
@@ -654,7 +720,7 @@ mod tests {
             match provider {
                 Provider::Codex => none.providers.codex.enabled = false,
                 Provider::ClaudeCode => none.providers.claude_code.enabled = false,
-                Provider::Gemini => none.providers.gemini.enabled = false,
+                Provider::Antigravity => none.providers.antigravity.enabled = false,
                 Provider::Grok => none.providers.grok.enabled = false,
             }
         }
